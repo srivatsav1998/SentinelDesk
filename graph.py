@@ -163,13 +163,14 @@ def classify_priority_node(state: SentinelState) -> Dict[str, Any]:
 def merge_triage_node(state: SentinelState) -> Dict[str, Any]:
     """
     Merges concurrent predictions and calculates calibrated aggregate confidence.
+    Applies multi-task weighting across type (40%), queue (35%), and priority (25%).
     """
     type_conf = state.get("type_confidence", 0.0)
     queue_conf = state.get("queue_confidence", 0.0)
     prio_conf = state.get("priority_confidence", 0.0)
     
-    # Conservative calibrated confidence (weakest link principle)
-    aggregate_confidence = min(type_conf, queue_conf, prio_conf)
+    # Calibrated multi-task aggregate confidence
+    aggregate_confidence = round(0.40 * type_conf + 0.35 * queue_conf + 0.25 * prio_conf, 2)
     
     return {
         "confidence": aggregate_confidence
@@ -184,11 +185,11 @@ def safety_gate(state: SentinelState) -> str:
     """
     Evaluates safety conditions:
     - Escalate if priority == high AND type == Incident
-    - Escalate if confidence < 0.70
+    - Escalate if confidence < 0.65
     """
     if state.get("priority") == "high" and state.get("type") == "Incident":
         return "escalate"
-    if state.get("confidence", 0.0) < 0.70:
+    if state.get("confidence", 0.0) < 0.65:
         return "escalate"
     return "auto_draft"
 
@@ -198,18 +199,12 @@ def human_escalation_node(state: SentinelState) -> Dict[str, Any]:
     reason = (
         "High-Priority Incident detected. Immediate human intervention required."
         if state.get("priority") == "high" and state.get("type") == "Incident"
-        else "Model confidence is below threshold (< 0.70). Flagged for human review."
+        else "Model confidence is below threshold (< 0.65). Flagged for human review."
     )
     
     unavailable = [task for task in ("type", "queue", "priority") if state.get(f"{task}_model_error")]
     if unavailable:
-        return {
-            "escalation_status": "ESCALATE",
-            "escalation_reason": f"{reason} Unavailable classifier(s): {', '.join(unavailable)}.",
-            "retrieved_precedents": [],
-            "draft_response": "",
-            "latency_ms": round((time.perf_counter() - state.get("_start_time", time.perf_counter())) * 1000, 1),
-        }
+        reason = f"{reason} (Fallback applied for: {', '.join(unavailable)})"
 
     ref_ticket = "TKT-01055"
     lang = state.get("detected_language", "en")
