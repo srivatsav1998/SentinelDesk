@@ -1,0 +1,82 @@
+{
+  "full": true,
+  "holdout_tickets": 12353,
+  "evaluated_tickets": 12353,
+  "leakage": {
+    "indexed_tickets": 49412,
+    "holdout_tickets": 12353,
+    "overlap": 0
+  },
+  "type": {
+    "rows": 9768,
+    "macro_f1": 0.8034,
+    "accuracy": 0.8137,
+    "per_class_f1": {
+      "Incident": 0.7967,
+      "Request": 0.9886,
+      "Problem": 0.466,
+      "Change": 0.9623
+    }
+  },
+  "priority": {
+    "rows": 12353,
+    "macro_f1": 0.5601,
+    "accuracy": 0.5878,
+    "per_class_f1": {
+      "high": 0.6161,
+      "medium": 0.6101,
+      "low": 0.4542
+    }
+  },
+  "queue": {
+    "rows": 9768,
+    "macro_f1": 0.6705,
+    "accuracy": 0.6795,
+    "per_class_f1": {
+      "Technical Support": 0.7156,
+      "Product Support": 0.6423,
+      "Customer Service": 0.6238,
+      "IT Support": 0.5943,
+      "Billing and Payments": 0.852,
+      "Returns and Exchanges": 0.6513,
+      "Service Outages and Maintenance": 0.7412,
+      "Sales and Pre-Sales": 0.5963,
+      "Human Resources": 0.6602,
+      "General Inquiry": 0.6281
+    }
+  },
+  "high_priority_incident": {
+    "count": 1692,
+    "strict_recall": 0.604,
+    "escalation_recall": 0.792,
+    "escalated_by_rule": {
+      "high_priority_incident": 1022,
+      "low_confidence": 506
+    }
+  },
+  "triage_escalation_rate": 0.5199,
+  "triage_ms_per_ticket": {
+    "type": 10.56,
+    "priority": 10.24,
+    "queue": 0.38
+  },
+  "end_to_end": {
+    "tickets": 200,
+    "llm_tickets": 20,
+    "latency_ms_p50": 78.2,
+    "latency_ms_p95": 802.9,
+    "escalation_rate": 0.545,
+    "trigger_counts": {
+      "low_confidence": 67,
+      "high_priority_incident": 50
+    },
+    "auto_drafts": 91,
+    "draft_verified_rate": 1.0,
+    "draft_sources": {
+      "gemini": 10,
+      "template": 81
+    },
+    "high_priority_incidents": 25,
+    "high_priority_incident_escalation_recall": 0.76
+  }
+}
