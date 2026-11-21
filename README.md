@@ -49,15 +49,40 @@ flowchart TD
 1. **`detect_language`**: Dynamically detects the input language using character n-grams.
 2. **Concurrent Triage (Fan-Out)**:
    - **`classify_type`**: Dedicated BERT model predicting `type` (`Incident`, `Request`, `Problem`, `Change`).
-   - **`classify_queue`**: Dedicated BERT model predicting department queue.
+   - **`classify_queue`**: Loads the department classifier from `models/queue/` when its checkpoint is available.
    - **`classify_priority`**: Dedicated BERT model predicting `priority` (`high`, `medium`, `low`).
-3. **`merge_triage` (Fan-In)**: Collects the concurrent predictions and computes the calibrated aggregate confidence.
+3. **`merge_triage` (Fan-In)**: Uses the lowest of the three classifier confidence scores as the aggregate routing score.
 4. **`safety_gate` (Conditional Edge)**:
    - **Escalates immediately** if `priority == high` AND `type == Incident`.
-   - **Escalates immediately** if aggregate confidence falls below `0.70`.
+   - **Routes to human review** if the aggregate score is below `0.70` or a classifier is unavailable.
 5. **`retrieval_node`**: Queries the historical training KB (80% split) for top-k relevant precedents using semantic similarity.
 6. **`drafter_node`**: Synthesizes a response in the requester's detected native language citing retrieved Ticket IDs (e.g., `[Reference: TKT-01055]`).
 7. **`human_escalation_node`**: Prepares an incident summary badge and routes to on-call engineering.
+
+---
+
+## Triage Training Progress
+
+1. **Built the workflow and operator console.** The first LangGraph version used keyword rules and fixed confidence values to exercise the three parallel classification nodes and escalation path.
+2. **Locked the shared data split.** The training notebooks pin the full Hugging Face dataset revision and reproduce the seed-42 split of **49,412 historical tickets** and **12,353 holdout tickets**. They use subject and body as the classifier inputs and handle blank subjects. The priority run maps `critical` to `high` and `very_low` to `low`. The type run excludes historical rows with missing type labels.
+3. **Fine-tuned and verified two checkpoints.** Type and priority each started from `google-bert/bert-base-multilingual-cased` with a fresh classification head. Each Colab run first trained, saved, reloaded, and ran inference on a small sample. The full runs then fine-tuned for one epoch on a T4 GPU.
+4. **Integrated real predictions.** The three graph nodes call the predictor functions in [`triage_engine.py`](triage_engine.py). The type and priority archives are versioned with Git LFS. Local smoke tests exercised both trained models through LangGraph with English and German inputs, including a blank subject, and verified the review path when the queue model is unavailable.
+
+### Historical validation results
+
+| Classifier | Fit rows | Validation rows | Calibration rows | Macro-F1 | Class recall |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Type | 31,055 | 3,882 | 3,882 | **80.81%** | **88.96%** for `Incident` |
+| Priority | 39,529 | 4,941 | 4,942 | **57.09%** | **54.42%** for `high` |
+| Queue | — | — | — | Pending | Pending |
+
+These results use validation subsets from the historical 80%. The final 20% evaluation is pending integration of the queue checkpoint. It will report macro-F1 for each target and joint high-priority incident recall on tickets labeled both `Incident` and `high`.
+
+### How prediction confidence works
+
+Each classifier produces one raw score (logit) per class. The training notebook fits a **temperature** on a separate historical calibration subset and saves it in `triage_metadata.json`. At inference, the loader divides the logits by that temperature, applies softmax, and returns the probability of the predicted class as its confidence score.
+
+LangGraph takes the minimum of the three scores for the `0.70` review gate. This minimum is a routing score. Macro-F1 and recall are evaluation metrics computed across many tickets. With the queue checkpoint pending, the graph still reports real type and priority predictions and routes the ticket to human review.
 
 ---
 
@@ -67,6 +92,7 @@ flowchart TD
 .
 ├── app.py                      # Live Streamlit Operator Console
 ├── graph.py                    # LangGraph StateGraph & Node Definitions
+├── triage_engine.py            # Loads local BERT checkpoints and predicts calibrated scores
 ├── pipeline.py                 # Standalone pipeline interface & language utils
 ├── data_loader.py              # Ingestion, 80/20 split & zero-leakage locking
 ├── validate_gemini.py          # CLI validation tool for Gemini API key
@@ -75,7 +101,7 @@ flowchart TD
 │   └── team_contracts.md       # Exact signatures for triage, retrieval, and drafter
 ├── findings/                   # Investigation logs & experiment findings
 │   └── 01_data_and_eda_findings.md # Dataset analysis & edge cases
-├── models/                     # Local directory for fine-tuned BERT model weights
+├── models/                     # Fine-tuned BERT archives tracked with Git LFS
 │   ├── type/                   # Model 1: Incident, Request, Problem, Change
 │   ├── queue/                  # Model 2: Department routing
 │   └── priority/               # Model 3: High, Medium, Low
@@ -90,10 +116,14 @@ flowchart TD
 ## Quickstart Guide
 
 ### 1. Environment Setup
+
+Install Git LFS to retrieve the tracked model archives. See [model setup](models/README.md) for the checkpoint paths.
+
 ```bash
-# Clone the repository
+git lfs install
 git clone <repo-url>
 cd <repo-folder>
+git lfs pull
 
 # Create and activate virtual environment
 python3 -m venv .venv
@@ -128,13 +158,13 @@ Open [http://localhost:8501](http://localhost:8501) in your browser.
 
 ---
 
-## Zero Data Leakage Guarantee
+## Data Split and Holdout Protocol
 
 To maintain ML integrity and adhere to evaluation rules:
 1. **Split Boundary**: The dataset (`Tobi-Bueck/customer-support-tickets`, 61,765 rows) is split deterministically (`random_state=42`) into:
    - **Knowledge Base (`kb_train.parquet`)**: 49,412 rows (80%). Allowed for classifier training and vector index creation.
-   - **Evaluation Holdout (`test_holdout.parquet`)**: 12,353 rows (20%). **Never indexed into vector stores or seen during inference.**
-2. **Missing Value Resilience**: ~8.7% of tickets contain null `subject` lines. The ingestion pipeline and triage nodes format input as `f"{subject or ''} {body}".strip()` to prevent runtime exceptions.
+   - **Evaluation Holdout (`test_holdout.parquet`)**: 12,353 rows (20%). Final inference uses only the subject and body. Labels are used afterward for scoring. Holdout answers stay out of retrieval and model inputs.
+2. **Missing Value Resilience**: ~8.7% of historical tickets have null subjects. The BERT type and priority tokenizers receive an empty subject in those cases and retain the message body.
 
 ---
 
