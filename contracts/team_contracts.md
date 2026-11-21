@@ -6,22 +6,36 @@ This document defines the exact functions and data formats the other teammates n
 
 ## 1. Teammate 1: Triage Classification Engineer
 **File to produce**: `triage_engine.py`  
-**Purpose**: Predict type, queue, and priority with a calibrated confidence score.
+**Purpose**: Predict type, queue, and priority with calibrated confidence scores (using 3 concurrent fine-tuned BERT models).
 
-### Required Function Signature:
+### Option A: Three Separate Predictors (Plugs directly into concurrent LangGraph nodes)
+```python
+def predict_type(text: str) -> tuple[str, float]:
+    """Returns (predicted_type, confidence_score)"""
+    # e.g. ("Incident", 0.94)
+
+def predict_queue(text: str) -> tuple[str, float]:
+    """Returns (predicted_queue, confidence_score)"""
+    # e.g. ("Technical Support", 0.92)
+
+def predict_priority(text: str) -> tuple[str, float]:
+    """Returns (predicted_priority, confidence_score)"""
+    # e.g. ("high", 0.96)
+```
+
+### Option B: Unified Predictor
 ```python
 def predict_triage(subject: str, body: str) -> dict:
     """
-    Args:
-        subject: Ticket subject (can be None or empty string)
-        body: Ticket body text
-        
     Returns:
         dict:
             "type": str ("Incident", "Request", "Problem", or "Change")
+            "type_confidence": float
             "queue": str ("Technical Support", "Billing and Payments", etc.)
+            "queue_confidence": float
             "priority": str ("high", "medium", or "low")
-            "confidence": float (between 0.0 and 1.0)
+            "priority_confidence": float
+            "confidence": float (aggregate calibrated score)
     """
 ```
 
