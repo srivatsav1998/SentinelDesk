@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 from functools import lru_cache
 from pathlib import Path
@@ -104,10 +105,73 @@ def _load_classifier(task: str) -> Classifier:
     return Classifier(model, tokenizer, temperature, max_tokens, input_format, temporary)
 
 
-def _predict(task: str, text: str, subject: str | None) -> tuple[str, float]:
-    # Prevent concurrent requests from loading the same weights more than once.
+def _sklearn_model_path(task: str) -> Path:
+    return MODELS / task / f"{task}_classifier.joblib"
+
+
+@lru_cache(maxsize=3)
+def _load_sklearn(task: str) -> tuple[object, float]:
+    """Linear text classifier produced by train_<task>.py (e.g. train_queue.py).
+
+    joblib uses pickle, so only load files this repo produced itself: the path is
+    fixed to models/<task>/ and the artifact is written by our training script,
+    never downloaded from user input.
+    """
+    path = _sklearn_model_path(task)
+    try:
+        import joblib
+
+        model = joblib.load(path)
+        meta_path = path.with_suffix(".json")
+        metadata = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+        temperature = float(metadata.get("temperature", 1.0))
+        if not math.isfinite(temperature) or temperature <= 0:
+            raise ValueError("calibration temperature must be finite and positive")
+    except (OSError, ValueError, ImportError, EOFError) as error:
+        raise ModelUnavailableError(f"could not load {path.name}: {error}") from error
+    return model, temperature
+
+
+def _predict_sklearn(task: str, text: str, subject: str | None) -> tuple[str, float]:
     with LOAD_LOCK:
-        classifier = _load_classifier(task)
+        model, temperature = _load_sklearn(task)
+    import numpy as np
+
+    logits = np.asarray(model.decision_function([f"{subject or ''}\n{text}".strip()])[0], dtype=float) / temperature
+    probabilities = np.exp(logits - logits.max())
+    probabilities /= probabilities.sum()
+    index = int(probabilities.argmax())
+    return str(model.classes_[index]), float(probabilities[index])
+
+
+def _use_sklearn(task: str) -> bool:
+    """Choose the backend for a task.
+
+    SENTINEL_<TASK>_BACKEND=sklearn|transformer forces one. By default the linear
+    model from train_<task>.py is preferred when present: for the queue, it scored
+    0.661 macro-F1 vs 0.230 for the 52-class mBERT checkpoint on 776 historical
+    tickets that neither model was trained on (findings/03_queue_model_comparison.md).
+    """
+    choice = os.environ.get(f"SENTINEL_{task.upper()}_BACKEND", "").strip().lower()
+    if choice == "transformer":
+        return False
+    if choice == "sklearn":
+        return True
+    return _sklearn_model_path(task).is_file()
+
+
+def _predict(task: str, text: str, subject: str | None) -> tuple[str, float]:
+    if _use_sklearn(task):
+        return _predict_sklearn(task, text, subject)
+    # Prevent concurrent requests from loading the same weights more than once.
+    try:
+        with LOAD_LOCK:
+            classifier = _load_classifier(task)
+    except ModelUnavailableError:
+        # Transformer checkpoint unusable: fall back to the trained linear model if present.
+        if _sklearn_model_path(task).is_file():
+            return _predict_sklearn(task, text, subject)
+        raise
 
     import torch
 
@@ -127,6 +191,52 @@ def _predict(task: str, text: str, subject: str | None) -> tuple[str, float]:
             if classifier.temperature is not None else 0.0
         )
     return classifier.model.config.id2label[index], confidence
+
+
+def predict_batch(
+    task: str, texts: list[str], subjects: list[str | None], batch_size: int = 32
+) -> list[tuple[str, float]]:
+    """Batched predictions for offline evaluation (same models and calibration as `_predict`)."""
+    classifier = None
+    if not _use_sklearn(task):
+        try:
+            with LOAD_LOCK:
+                classifier = _load_classifier(task)
+        except ModelUnavailableError:
+            if not _sklearn_model_path(task).is_file():
+                raise
+    if classifier is None:
+        with LOAD_LOCK:
+            model, temperature = _load_sklearn(task)
+        import numpy as np
+
+        joined = [f"{s or ''}\n{t}".strip() for s, t in zip(subjects, texts)]
+        logits = np.asarray(model.decision_function(joined), dtype=float) / temperature
+        logits -= logits.max(axis=1, keepdims=True)
+        probabilities = np.exp(logits)
+        probabilities /= probabilities.sum(axis=1, keepdims=True)
+        indices = probabilities.argmax(axis=1)
+        return [(str(model.classes_[i]), float(probabilities[row, i])) for row, i in enumerate(indices)]
+
+    import torch
+
+    results: list[tuple[str, float]] = []
+    options = {"return_tensors": "pt", "truncation": True, "max_length": classifier.max_tokens, "padding": True}
+    for start in range(0, len(texts), batch_size):
+        chunk_text = texts[start:start + batch_size]
+        chunk_subject = [s or "" for s in subjects[start:start + batch_size]]
+        if classifier.input_format == "paired":
+            inputs = classifier.tokenizer(chunk_subject, chunk_text, **options)
+        else:
+            inputs = classifier.tokenizer([f"{s} {t}".strip() for s, t in zip(chunk_subject, chunk_text)], **options)
+        with torch.inference_mode():
+            logits = classifier.model(**inputs).logits
+            scale = classifier.temperature if classifier.temperature is not None else 1.0
+            probabilities = (logits / scale).softmax(dim=-1)
+            confidence, index = probabilities.max(dim=-1)
+        for i, c in zip(index.tolist(), confidence.tolist()):
+            results.append((classifier.model.config.id2label[i], c if classifier.temperature is not None else 0.0))
+    return results
 
 
 def predict_type(text: str, *, subject: str | None = None) -> tuple[str, float]:

@@ -1,0 +1,31 @@
+{
+  "backend": "sklearn",
+  "model_file": "queue_classifier.joblib",
+  "features": "tfidf word 1-2 + char_wb 3-5 (150k each), logistic regression (class_weight=balanced)",
+  "input_format": "subject\\nbody",
+  "temperature": 1.2792111491188822,
+  "C": 64.0,
+  "classes": [
+    "Billing and Payments",
+    "Customer Service",
+    "General Inquiry",
+    "Human Resources",
+    "IT Support",
+    "Product Support",
+    "Returns and Exchanges",
+    "Sales and Pre-Sales",
+    "Service Outages and Maintenance",
+    "Technical Support"
+  ],
+  "validation": {
+    "macro_f1": 0.6507,
+    "calibration_slice_macro_f1": 0.6715,
+    "ece_raw": 0.0692,
+    "ece_calibrated": 0.04
+  },
+  "fit_rows": 34937,
+  "validation_rows": 3882,
+  "calibration_rows": 3882,
+  "dataset_revision": "ddf1c81a5475992c4fa6752bf1e8b4e31f07bbeb",
+  "seed": 42
+}
