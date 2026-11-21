@@ -14,8 +14,16 @@ Concurrent Multi-Model StateGraph:
 """
 
 import time
+import os
 from typing import TypedDict, List, Dict, Any, Optional
 from langgraph.graph import StateGraph, START, END
+
+# Load environment variables from .env if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # Robust language detection
 try:
@@ -337,17 +345,23 @@ def drafter_node(state: SentinelState) -> Dict[str, Any]:
                 f"If the precedents do not contain sufficient guidance, state that the issue is being reviewed by operations."
             )
             
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=sys_instruct,
-                    temperature=0.2,
-                    max_output_tokens=350
-                )
-            )
-            if response and response.text:
-                draft = response.text.strip()
+            # Use active fast model with fallback
+            for model_name in ["gemini-3.5-flash-lite", "gemini-3.8-flash"]:
+                try:
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=sys_instruct,
+                            temperature=0.2,
+                            max_output_tokens=350
+                        )
+                    )
+                    if response and response.text:
+                        draft = response.text.strip()
+                        break
+                except Exception:
+                    continue
         except Exception:
             draft = None
 

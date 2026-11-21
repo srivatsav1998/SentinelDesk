@@ -1,6 +1,9 @@
 import os
 import sys
 import time
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def test_gemini_connection():
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -18,7 +21,7 @@ def test_gemini_connection():
         
         start_time = time.perf_counter()
         response = client.models.generate_content(
-            model="gemini-3.8-flash",
+            model="gemini-3.5-flash-lite",
             contents="Respond with only: 'API connection successful.'"
         )
         latency = round((time.perf_counter() - start_time) * 1000, 1)

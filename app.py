@@ -2,7 +2,11 @@ import streamlit as st
 import json
 import os
 import time
+from dotenv import load_dotenv
 from graph import build_sentinel_graph
+
+# Load .env file automatically
+load_dotenv()
 
 # Page setup
 st.set_page_config(page_title="SentinelDesk", layout="wide")
@@ -30,7 +34,7 @@ with st.sidebar:
                     test_client = genai.Client(api_key=clean_key)
                     t0 = time.perf_counter()
                     resp = test_client.models.generate_content(
-                        model="gemini-3.8-flash",
+                        model="gemini-3.5-flash-lite",
                         contents="Ping. Respond with 'Connected'"
                     )
                     dt = round((time.perf_counter() - t0) * 1000, 1)
