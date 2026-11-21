@@ -1,0 +1,20 @@
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# macOS
+.DS_Store
+
+# Streamlit
+.streamlit/
+
+# Large data splits (generated deterministically via python data_loader.py)
+data/*.parquet
+!data/sample_ui_presets.json
