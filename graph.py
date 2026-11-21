@@ -18,6 +18,8 @@ import os
 from typing import TypedDict, List, Dict, Any, Optional
 from langgraph.graph import StateGraph, START, END
 
+from triage_engine import ModelUnavailableError, predict_priority, predict_queue, predict_type
+
 # Load environment variables from .env if present
 try:
     from dotenv import load_dotenv
@@ -65,6 +67,9 @@ class SentinelState(TypedDict, total=False):
     
     priority: str
     priority_confidence: float
+    type_model_error: str
+    queue_model_error: str
+    priority_model_error: str
     
     # Combined metrics
     confidence: float
@@ -98,68 +103,28 @@ def detect_language_node(state: SentinelState) -> Dict[str, Any]:
 # 2. Concurrent Triage Nodes (Fan-Out: Model 1, Model 2, Model 3)
 # ---------------------------------------------------------------------------
 
-def classify_type_node(state: SentinelState) -> Dict[str, Any]:
-    """
-    Hook for Teammate: BERT Model 1 (Type Classifier).
-    Predicts: Incident, Request, Problem, Change.
-    """
-    text = f"{state.get('subject') or ''} {state.get('body', '')}".lower()
-    
-    if any(k in text for k in ["outage", "down", "fails", "broken", "breach", "disrupting"]):
-        pred_type, conf = "Incident", 0.94
-    elif any(k in text for k in ["inquire", "request", "need access", "upgrade", "how to"]):
-        pred_type, conf = "Request", 0.90
-    elif any(k in text for k in ["problem", "bug", "error"]):
-        pred_type, conf = "Problem", 0.85
-    else:
-        pred_type, conf = "Change", 0.78
+def _classify(state: SentinelState, task: str, predictor) -> Dict[str, Any]:
+    try:
+        label, confidence = predictor(state.get("body", ""), subject=state.get("subject"))
+    except ModelUnavailableError as error:
+        return {
+            task: "Unavailable",
+            f"{task}_confidence": 0.0,
+            f"{task}_model_error": str(error),
+        }
+    return {task: label, f"{task}_confidence": confidence}
 
-    return {
-        "type": pred_type,
-        "type_confidence": conf
-    }
+
+def classify_type_node(state: SentinelState) -> Dict[str, Any]:
+    return _classify(state, "type", predict_type)
 
 
 def classify_queue_node(state: SentinelState) -> Dict[str, Any]:
-    """
-    Hook for Teammate: BERT Model 2 (Queue Classifier).
-    Predicts routing department: Technical Support, Billing and Payments, etc.
-    """
-    text = f"{state.get('subject') or ''} {state.get('body', '')}".lower()
-    
-    if any(k in text for k in ["billing", "pricing", "payment", "invoice", "rechnung", "sepa"]):
-        queue, conf = "Billing and Payments", 0.95
-    elif any(k in text for k in ["server", "platform", "outage", "cluster", "telemedicine"]):
-        queue, conf = "Technical Support", 0.92
-    elif any(k in text for k in ["login", "password", "vpn", "account", "reset"]):
-        queue, conf = "IT Support", 0.89
-    else:
-        queue, conf = "Customer Service", 0.82
-
-    return {
-        "queue": queue,
-        "queue_confidence": conf
-    }
+    return _classify(state, "queue", predict_queue)
 
 
 def classify_priority_node(state: SentinelState) -> Dict[str, Any]:
-    """
-    Hook for Teammate: BERT Model 3 (Priority Classifier).
-    Predicts: high, medium, low.
-    """
-    text = f"{state.get('subject') or ''} {state.get('body', '')}".lower()
-    
-    if any(k in text for k in ["critical", "outage", "dringend", "emergency", "fail", "urgent", "breach"]):
-        priority, conf = "high", 0.96
-    elif any(k in text for k in ["inquiry", "how to", "pricing", "frage"]):
-        priority, conf = "low", 0.91
-    else:
-        priority, conf = "medium", 0.82
-
-    return {
-        "priority": priority,
-        "priority_confidence": conf
-    }
+    return _classify(state, "priority", predict_priority)
 
 
 # ---------------------------------------------------------------------------
@@ -169,12 +134,12 @@ def merge_triage_node(state: SentinelState) -> Dict[str, Any]:
     """
     Merges concurrent predictions and calculates calibrated aggregate confidence.
     """
-    type_conf = state.get("type_confidence", 0.80)
-    queue_conf = state.get("queue_confidence", 0.80)
-    prio_conf = state.get("priority_confidence", 0.80)
+    type_conf = state.get("type_confidence", 0.0)
+    queue_conf = state.get("queue_confidence", 0.0)
+    prio_conf = state.get("priority_confidence", 0.0)
     
     # Conservative calibrated confidence (weakest link principle)
-    aggregate_confidence = round(min(type_conf, queue_conf, prio_conf), 2)
+    aggregate_confidence = min(type_conf, queue_conf, prio_conf)
     
     return {
         "confidence": aggregate_confidence
@@ -206,6 +171,16 @@ def human_escalation_node(state: SentinelState) -> Dict[str, Any]:
         else "Model confidence is below threshold (< 0.70). Flagged for human review."
     )
     
+    unavailable = [task for task in ("type", "queue", "priority") if state.get(f"{task}_model_error")]
+    if unavailable:
+        return {
+            "escalation_status": "ESCALATE",
+            "escalation_reason": f"{reason} Unavailable classifier(s): {', '.join(unavailable)}.",
+            "retrieved_precedents": [],
+            "draft_response": "",
+            "latency_ms": round((time.perf_counter() - state.get("_start_time", time.perf_counter())) * 1000, 1),
+        }
+
     ref_ticket = "TKT-01055"
     lang = state.get("detected_language", "en")
     

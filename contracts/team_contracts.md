@@ -10,18 +10,22 @@ This document defines the exact functions and data formats the other teammates n
 
 ### Option A: Three Separate Predictors (Plugs directly into concurrent LangGraph nodes)
 ```python
-def predict_type(text: str) -> tuple[str, float]:
+def predict_type(text: str, *, subject: str | None = None) -> tuple[str, float]:
     """Returns (predicted_type, confidence_score)"""
     # e.g. ("Incident", 0.94)
 
-def predict_queue(text: str) -> tuple[str, float]:
+def predict_queue(text: str, *, subject: str | None = None) -> tuple[str, float]:
     """Returns (predicted_queue, confidence_score)"""
     # e.g. ("Technical Support", 0.92)
 
-def predict_priority(text: str) -> tuple[str, float]:
+def predict_priority(text: str, *, subject: str | None = None) -> tuple[str, float]:
     """Returns (predicted_priority, confidence_score)"""
     # e.g. ("high", 0.96)
 ```
+
+Pass the body as `text` and the subject separately when available. All three
+functions also accept a single text argument. A missing checkpoint raises
+`ModelUnavailableError` so the graph can route to human review.
 
 ### Option B: Unified Predictor
 ```python
@@ -90,7 +94,8 @@ def generate_draft_reply(
 
 ## 4. Integration Point in LangGraph (`graph.py`)
 Once your teammates provide these 3 functions, they replace the temporary placeholders in `graph.py`:
-1. `triage_node` calls `predict_triage(subject, body)`
+1. The three concurrent classification nodes call `predict_type`, `predict_queue`,
+   and `predict_priority` with the body and optional subject.
 2. `retrieval_node` calls `retrieve_precedents(text, top_k)`
 3. `drafter_node` calls `generate_draft_reply(text, lang, precedents)`
 

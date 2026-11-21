@@ -8,3 +8,5 @@ pydantic>=2.7.0
 langdetect>=1.0.9
 google-genai>=0.1.0
 python-dotenv>=1.0.0
+torch>=2.6,<3
+transformers>=5.13.1,<6
