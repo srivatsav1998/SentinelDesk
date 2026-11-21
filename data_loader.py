@@ -16,13 +16,6 @@ def prepare_data(data_dir: str = DATA_DIR):
     df = ds["train"].to_pandas()
     print(f"Dataset successfully loaded. Total rows: {len(df)}")
     
-    # Strictly follow the problem.pdf specification:
-    # df = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
-    # df["ticket_id"] = [f"TKT-{i:05d}" for i in range(len(df))]
-    # split_idx = int(len(df) * 0.8)
-    # kb_train_df = df.iloc[:split_idx].copy()
-    # test_df = df.iloc[split_idx:].copy()
-    
     print("\nApplying deterministic shuffle (random_state=42) and ticket_id generation...")
     df = df.sample(frac=1.0, random_state=42).reset_index(drop=True)
     df["ticket_id"] = [f"TKT-{i:05d}" for i in range(len(df))]
@@ -61,15 +54,15 @@ def prepare_data(data_dir: str = DATA_DIR):
         print("\n--- Distribution of 'language' (Train) ---")
         print(kb_train_df["language"].value_counts(dropna=False))
         
-    # Generate UI Demo Presets for person 4 (UI Developer)
+    # Generate UI Demo Presets for UI Developer
     presets = []
     
-    # 1. High Priority Incident (Hospital/EMR/Critical outage example)
+    # 1. High Priority Incident
     high_incidents = test_df[(test_df["priority"] == "high") & (test_df["type"] == "Incident")]
     if not high_incidents.empty:
         row = high_incidents.iloc[0]
         presets.append({
-            "name": "🚨 Critical High-Priority Incident (Expect Escalation)",
+            "name": "Critical High-Priority Incident (Expect Escalation)",
             "subject": "" if pd.isna(row["subject"]) else str(row["subject"]),
             "body": str(row["body"]),
             "expected_type": str(row["type"]),
@@ -84,7 +77,7 @@ def prepare_data(data_dir: str = DATA_DIR):
     if not de_tickets.empty:
         row = de_tickets.iloc[0]
         presets.append({
-            "name": "🇩🇪 German Language Ticket (Multilingual Test)",
+            "name": "German Language Ticket (Multilingual Test)",
             "subject": "" if pd.isna(row["subject"]) else str(row["subject"]),
             "body": str(row["body"]),
             "expected_type": str(row["type"]),
@@ -94,12 +87,12 @@ def prepare_data(data_dir: str = DATA_DIR):
             "notes": "Verifies language detection and grounded generation in German"
         })
         
-    # 3. Standard Routine Request (Auto-Draft Ready)
+    # 3. Standard Routine Request
     routine = test_df[(test_df["priority"] == "low") & (test_df["type"] == "Request")]
     if not routine.empty:
         row = routine.iloc[0]
         presets.append({
-            "name": "🟢 Routine Low-Priority Request (Auto-Draft Ready)",
+            "name": "Routine Low-Priority Request (Auto-Draft Ready)",
             "subject": "" if pd.isna(row["subject"]) else str(row["subject"]),
             "body": str(row["body"]),
             "expected_type": str(row["type"]),
@@ -114,7 +107,7 @@ def prepare_data(data_dir: str = DATA_DIR):
     if not missing_subj.empty:
         row = missing_subj.iloc[0]
         presets.append({
-            "name": "⚠️ Empty Subject Line Edge Case",
+            "name": "Empty Subject Line Edge Case",
             "subject": "",
             "body": str(row["body"]),
             "expected_type": str(row["type"]),

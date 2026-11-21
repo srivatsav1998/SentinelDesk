@@ -109,12 +109,12 @@ def process_ticket(
     
     if pred_priority == "high" and pred_type == "Incident":
         escalate = True
-        escalation_reason = "🚨 Immediate Human Escalation: High-Priority Incident detected (Service disruption / outage risk)."
+        escalation_reason = "Immediate Human Escalation: High-Priority Incident detected (Service disruption / outage risk)."
     elif confidence < 0.70:
         escalate = True
-        escalation_reason = "⚠️ Human Review Required: Model confidence below safety threshold (confidence < 0.70)."
+        escalation_reason = "Human Review Required: Model confidence below safety threshold (confidence < 0.70)."
     else:
-        escalation_reason = "✅ Auto-Draft Ready: Safe for AI resolution with historical precedent grounding."
+        escalation_reason = "Auto-Draft Ready: Safe for AI resolution with historical precedent grounding."
         
     # ---------------------------------------------------------
     # 3. RETRIEVAL & HISTORICAL PRECEDENTS (Hook for Person 2)

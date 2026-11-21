@@ -1,6 +1,6 @@
 [
   {
-    "name": "🚨 Critical High-Priority Incident (Expect Escalation)",
+    "name": "Critical High-Priority Incident (Expect Escalation)",
     "subject": " Urgent Support Required for Project Management Platform",
     "body": "Our project management platform is currently facing a critical outage which is disrupting user access. Recent server updates might be the cause. We have attempted to restart services and rolled back the updates, but the issue still persists. We require assistance to resolve this matter.",
     "expected_type": "Incident",
@@ -10,7 +10,7 @@
     "notes": "Triggers immediate human escalation gate (High priority Incident)"
   },
   {
-    "name": "🇩🇪 German Language Ticket (Multilingual Test)",
+    "name": "German Language Ticket (Multilingual Test)",
     "subject": "Dringend: Start der Festival-Kampagne durch Problem mit programmatischen Anzeigen blockiert",
     "body": "Sehr geehrte Support-Mitarbeiter,\\n\\nwir sehen uns mit Verzögerungen beim Start unserer Festival-Kampagne aufgrund von Problemen mit programmatischer Werbung konfrontiert. Eine manuelle Lösung wurde vorübergehend implementiert.",
     "expected_type": "nan",
@@ -20,7 +20,7 @@
     "notes": "Verifies language detection and grounded generation in German"
   },
   {
-    "name": "🟢 Routine Low-Priority Request (Auto-Draft Ready)",
+    "name": "Routine Low-Priority Request (Auto-Draft Ready)",
     "subject": "Inquiry on Billing Integration Options for SaaS Platform",
     "body": "I am reaching out to inquire about the billing integration options available for the SaaS platform. Could you provide details on the various plans and pricing models? I would greatly appreciate information on any discounts or promotions that may be available. Additionally, could you let me know about the security measures in place to protect customer data? Thank you for your time and assistance. I look forward to hearing back soon.",
     "expected_type": "Request",
@@ -30,7 +30,7 @@
     "notes": "Standard grounded auto-reply generation"
   },
   {
-    "name": "⚠️ Empty Subject Line Edge Case",
+    "name": "Empty Subject Line Edge Case",
     "subject": "",
     "body": "The hospital system is facing a problem with data access. Currently, the ability to retrieve billing data for patient accounts is unavailable. The cause is uncertain but could be related to a recent software update or a potential network security breach. Steps taken so far, such as rebooting the server and verifying user permissions, have not resolved the issue.",
     "expected_type": "Problem",

@@ -1,24 +1,24 @@
-# 🛡️ SentinelDesk
+# SentinelDesk
 
 > **Autonomous Multilingual Incident Triage, Smart Escalation & Grounded Resolution Copilot**  
 > Built for enterprise technical operations with zero-leakage RAG and deterministic safety guardrails.
 
 ---
 
-## 📌 Executive Summary
+## Executive Summary
 
 Enterprise IT helpdesks face two critical challenges:
 1. **Triage Bottlenecks**: High-severity outages are buried in unstructured ticket queues alongside low-priority requests.
 2. **LLM Hallucinations**: Generative AI models routinely invent non-existent policies, SLA guarantees, or unsafe troubleshooting advice.
 
-**SentinelDesk** solves both using an agentic **LangGraph** pipeline:
+**SentinelDesk** addresses both using an agentic **LangGraph** pipeline:
 - **Instant Triage**: Classifies incoming tickets into `type`, `queue`, and `priority` with confidence scoring.
 - **Safety Escalation Gate**: Intercepts high-severity incidents or low-confidence predictions, routing them directly to human on-call engineers.
 - **Precedent-Grounded RAG**: Retrieves historical resolutions from past tickets and synthesizes draft replies strictly grounded in cited Ticket IDs (supporting both English and German).
 
 ---
 
-## 🏗️ Architecture & Workflow
+## Architecture & Workflow
 
 SentinelDesk is implemented as a deterministic state graph:
 
@@ -41,13 +41,13 @@ flowchart TD
 2. **`safety_gate` (Conditional Edge)**:
    - **Escalates immediately** if `priority == high` AND `type == Incident`.
    - **Escalates immediately** if classifier confidence falls below `0.70`.
-3. **`retrieval_node`**: Queries the historical training KB (80% split) for top-$k$ relevant precedents using semantic similarity.
+3. **`retrieval_node`**: Queries the historical training KB (80% split) for top-k relevant precedents using semantic similarity.
 4. **`drafter_node`**: Synthesizes a response in the requester's native language (`en` or `de`) citing retrieved Ticket IDs (e.g., `[Reference: TKT-01055]`).
-5. **`human_escalation_node`**: Prepares an incident summary badge and pages on-call engineering.
+5. **`human_escalation_node`**: Prepares an incident summary badge and routes to on-call engineering.
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 .
@@ -68,7 +68,7 @@ flowchart TD
 
 ---
 
-## ⚡ Quickstart Guide
+## Quickstart Guide
 
 ### 1. Environment Setup
 ```bash
@@ -98,9 +98,9 @@ Open [http://localhost:8501](http://localhost:8501) in your browser.
 
 ---
 
-## 📊 Core Deliverables & Technical Specifications
+## Core Deliverables & Technical Specifications
 
-| Component | Responsibility | Key Metric / SLA |
+| Component | Responsibility | Key Metric / Target |
 | :--- | :--- | :--- |
 | **Multi-Task Triage** | Predicts `type`, `queue`, `priority`, `confidence` | Target: Macro-F1 across classes; High-Priority Incident Recall |
 | **Escalation Gate** | Deterministic rule check for risk mitigation | Zero false negatives on critical infrastructure outages |
@@ -109,9 +109,9 @@ Open [http://localhost:8501](http://localhost:8501) in your browser.
 
 ---
 
-## 🔒 Zero Data Leakage Guarantee
+## Zero Data Leakage Guarantee
 
-To maintain strict ML integrity and adhere to hackathon rules:
+To maintain ML integrity and adhere to evaluation rules:
 1. **Split Boundary**: The dataset (`Tobi-Bueck/customer-support-tickets`, 61,765 rows) is split deterministically (`random_state=42`) into:
    - **Knowledge Base (`kb_train.parquet`)**: 49,412 rows (80%). Allowed for classifier training and vector index creation.
    - **Evaluation Holdout (`test_holdout.parquet`)**: 12,353 rows (20%). **Never indexed into vector stores or seen during inference.**
@@ -119,16 +119,16 @@ To maintain strict ML integrity and adhere to hackathon rules:
 
 ---
 
-## 🧑‍⚖️ Judge Testing Guide (Live Demo)
+## Judge Testing Guide (Live Demo)
 
 When demonstrating in `app.py`, use the **Load Sample Ticket** selector to showcase key scenarios:
 
-1. **🚨 Critical Server Outage**:
+1. **Critical Server Outage**:
    - *Behavior*: Predicted as `Incident` / `high` priority.
-   - *Outcome*: Triggers red **ESCALATE TO ON-CALL ENGINEER** badge with paged response.
-2. **🇩🇪 Multilingual German Inquiry**:
+   - *Outcome*: Triggers red `STATUS: ESCALATE TO ON-CALL ENGINEER` badge with paged response.
+2. **Multilingual German Inquiry**:
    - *Behavior*: Automatically detects German (`de`).
    - *Outcome*: Generates grounded German draft citing past resolution ticket IDs.
-3. **⚠️ Missing Subject Line**:
+3. **Missing Subject Line**:
    - *Behavior*: Evaluates full message body without crashing on null subjects.
    - *Outcome*: Correctly categorized and processed.

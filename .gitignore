@@ -15,6 +15,9 @@ __pycache__/
 # Streamlit
 .streamlit/
 
+# Problem statement PDF
+problem.pdf
+
 # Large data splits (generated deterministically via python data_loader.py)
 data/*.parquet
 !data/sample_ui_presets.json
