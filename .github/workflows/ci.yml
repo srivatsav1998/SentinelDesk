@@ -24,3 +24,6 @@ jobs:
         run: |
           pip install ruff
           ruff check --select E9,F63,F7,F82 --output-format=github .
+
+      - name: Unit tests (gate, guardrails, verifier; ML-dependent tests skip without torch)
+        run: python -m unittest discover -s tests -v

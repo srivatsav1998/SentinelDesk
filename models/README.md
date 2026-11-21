@@ -18,6 +18,19 @@ The tracked ZIPs are `models/type/sentineldesk-type.zip` and
 use and caches the loaded classifiers. An extracted Hugging Face checkpoint
 in the corresponding model directory also works.
 
+### Queue model
+
+`models/queue/` holds two queue classifiers:
+
+* `queue_classifier.joblib` + `queue_classifier.json`: TF-IDF + logistic regression trained by
+  `python train_queue.py` on the 10 real support queues (9.7 MB, plain git). **Used by default.**
+* `sentineldesk-queue.zip`: mBERT checkpoint from `notebooks/train_queue_classifier.ipynb` (Git LFS),
+  trained on 52 labels including the third CSV's foreign taxonomy.
+
+On 776 historical tickets that neither model saw, the TF-IDF model scores 0.661 macro-F1 vs 0.230
+(`python compare_queue_models.py`, `findings/03_queue_model_comparison.md`). Set
+`SENTINEL_QUEUE_BACKEND=transformer` to use the checkpoint instead.
+
 When the queue checkpoint is ready, place it in `models/queue/` as an
 extracted checkpoint or as `sentineldesk-queue.zip` with files at its root.
 Use real class names in the checkpoint's `id2label` mapping. Supply

@@ -100,3 +100,15 @@ Once your teammates provide these 3 functions, they replace the temporary placeh
 3. `drafter_node` calls `generate_draft_reply(text, lang, precedents)`
 
 Everything else (state passing, escalation condition, UI) will just work without any rewrites.
+
+---
+
+## 5. Implementation Status
+
+| Contract | File | Notes |
+| :--- | :--- | :--- |
+| `predict_type` / `predict_priority` | `triage_engine.py` | Fine-tuned mBERT checkpoints (Git LFS) |
+| `predict_queue` | `triage_engine.py` | TF-IDF + logistic regression (`models/queue/queue_classifier.joblib`, trained by `train_queue.py`); a transformer checkpoint in `models/queue/` takes precedence |
+| `retrieve_precedents` | `retriever.py` | Also returns `subject`, `language`, `queue`, `type`, `priority`; never returns tickets without an answer; model and index load once (`warm_up()`) |
+| `generate_draft_reply` | `drafter.py` | Returns the text only. The graph calls `generate_grounded_draft(...)`, which also returns the source model, verifier result, rejected drafts and PII counts |
+| Escalation rules | `safety_gate.py` | `evaluate_safety_gate(..., ticket_text=, precedents=, retrieval_error=)` adds the similarity, unsupported-request and prompt-injection rules |

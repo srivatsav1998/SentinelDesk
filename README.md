@@ -12,9 +12,10 @@ Enterprise IT helpdesks face two critical challenges:
 2. **LLM Hallucinations**: Generative AI models routinely invent non-existent policies, SLA guarantees, or unsafe troubleshooting advice.
 
 **SentinelDesk** addresses both using an agentic **LangGraph** pipeline:
-- **Instant Triage**: Classifies incoming tickets into `type`, `queue`, and `priority` with confidence scoring.
-- **Safety Escalation Gate**: Intercepts high-severity incidents or low-confidence predictions, routing them directly to human on-call engineers.
-- **Precedent-Grounded RAG**: Retrieves historical resolutions from past tickets and synthesizes draft replies strictly grounded in cited Ticket IDs (supporting both English and German).
+- **Instant Triage**: Classifies incoming tickets into `type`, `queue`, and `priority` with calibrated confidence scores.
+- **Safety Escalation Gate**: Routes high-priority incidents, low-confidence predictions, out-of-scope tickets with no historical precedent, unsupported refund/compensation/guarantee/legal requests and prompt-injection attempts to a human.
+- **Precedent-Grounded RAG**: Retrieves the most similar resolved tickets (cross-lingual, English and German) and drafts a reply in the requester's language that cites those ticket IDs.
+- **Grounding Verifier**: Blocks any LLM draft that cites a ticket that was not retrieved, states a number that is not in the evidence, or promises a refund, compensation or guarantee that no precedent supports.
 
 ---
 
@@ -24,43 +25,63 @@ SentinelDesk is implemented as a deterministic, concurrent state graph:
 
 ```mermaid
 flowchart TD
-    Start([Raw Incoming Ticket]) --> Detect[1. Language Detection Node]
-    
-    Detect --> C_Type[2a. Model 1: Type Classifier]
-    Detect --> C_Queue[2b. Model 2: Queue Classifier]
-    Detect --> C_Priority[2c. Model 3: Priority Classifier]
+    Start([Raw Incoming Ticket]) --> Detect[1. Language Detection: en / de]
 
-    C_Type --> Merge[3. Merge Triage Node]
+    Detect --> C_Type[2a. Type: fine-tuned mBERT]
+    Detect --> C_Queue[2b. Queue: TF-IDF + calibrated LR]
+    Detect --> C_Priority[2c. Priority: fine-tuned mBERT]
+    Detect --> RAG[2d. Precedent Retrieval: bge-m3 + Chroma, 80% KB]
+
+    C_Type --> Merge[3. Merge Triage]
     C_Queue --> Merge
     C_Priority --> Merge
+    RAG --> Merge
 
     Merge --> Gate{4. Safety Escalation Gate}
 
-    Gate -- "Priority == High & Type == Incident<br/>OR Confidence < 0.70" --> Escalate[Human Escalation Node]
-    Gate -- "Safe / High Confidence" --> RAG[5. Precedent Retrieval Node]
-
-    RAG --> Drafter[6. Grounded Drafter Node]
+    Gate -- "High-priority Incident / low confidence /<br/>no precedent above 0.58 / unsupported request /<br/>prompt injection / model or search unavailable" --> Escalate[5a. Escalation: holding reply + on-call handoff note]
+    Gate -- "Safe and grounded" --> Drafter[5b. Gemini Draft + Grounding Verifier]
 
     Escalate --> UI([Live Operator Console])
     Drafter --> UI
 ```
 
 ### Graph Execution Path:
-1. **`detect_language`**: Dynamically detects the input language using character n-grams.
-2. **Concurrent Triage (Fan-Out)**:
-   - **`classify_type`**: Dedicated BERT model predicting `type` (`Incident`, `Request`, `Problem`, `Change`).
-   - **`classify_queue`**: Loads the department classifier from `models/queue/` when its checkpoint is available.
-   - **`classify_priority`**: Dedicated BERT model predicting `priority` (`high`, `medium`, `low`).
-3. **`merge_triage` (Fan-In)**: Uses the lowest of the three classifier confidence scores as the aggregate routing score.
-4. **`safety_gate` (Gate node + Conditional Edge)**: rules live in `safety_gate.py` and are shared with `pipeline.py`. The node records `escalation_status`, `escalation_reason` and `escalation_triggers` in state; the conditional edge then routes on that decision.
-   - **Escalates immediately** if `priority == high` AND `type == Incident`.
-   - **Routes to human review** if the aggregate score is below `SENTINEL_CONFIDENCE_THRESHOLD` (default `0.65`).
-   - **Fails safe**: missing or invalid type, priority or confidence, or an error inside the gate, always escalates.
-   - **Classifier unavailable**: when a model checkpoint is missing and a keyword fallback is used, the reason says so. Set `SENTINEL_ESCALATE_ON_FALLBACK=true` to escalate these tickets instead; turn it on once all three checkpoints are in `models/`.
-   - Tests: `python -m unittest discover -s tests -v`
-5. **`retrieval_node`**: Queries the historical training KB (80% split) for top-k relevant precedents using semantic similarity.
-6. **`drafter_node`**: Synthesizes a response in the requester's detected native language citing retrieved Ticket IDs (e.g., `[Reference: TKT-01055]`).
-7. **`human_escalation_node`**: Prepares an incident summary badge and routes to on-call engineering.
+1. **`detect_language`**: Deterministic English/German detection (seeded `langdetect`, clamped to `en`/`de`, stop-word fallback).
+2. **Concurrent fan-out** (four parallel nodes):
+   - **`classify_type`**: fine-tuned multilingual BERT predicting `type` (`Incident`, `Request`, `Problem`, `Change`).
+   - **`classify_queue`**: TF-IDF + logistic regression over the 10 support queues (`models/queue/`). A transformer checkpoint placed in `models/queue/` takes precedence automatically.
+   - **`classify_priority`**: fine-tuned multilingual BERT predicting `priority` (`high`, `medium`, `low`).
+   - **`retrieve`**: top-k (default 3) most similar resolved tickets from the 80% knowledge base (`retriever.py`, BAAI/bge-m3 embeddings in Chroma). Tickets without a recorded answer are never returned. English and German precedents are matched across languages.
+3. **`merge_triage` (fan-in)**: aggregate routing confidence = 0.40 × type + 0.35 × queue + 0.25 × priority.
+4. **`safety_gate`**: every rule lives in `safety_gate.py` (see the table below). The node records `escalation_status`, `escalation_reason`, `escalation_triggers`, the best precedent similarity and any unsupported requests in state.
+5. **`draft`** (auto-draft path): `drafter.py` masks PII, asks Gemini for a reply in the requester's language using only the retrieved precedents, and runs the grounding verifier. A rejected draft is retried once with the verifier's findings, then replaced by an extractive draft built directly from the precedent text. Without an API key the extractive draft is used.
+6. **`escalate`** (human path): a holding reply in the requester's language with no claims or promises, plus an internal handoff note listing the real retrieved precedents for the on-call engineer.
+
+### Safety gate rules (`safety_gate.py`)
+
+| Trigger | Escalates when | Setting |
+| :--- | :--- | :--- |
+| `high_priority_incident` | predicted `priority == high` and `type == Incident` | always |
+| `low_confidence` | aggregate confidence below threshold | `SENTINEL_CONFIDENCE_THRESHOLD` (0.65) |
+| `low_similarity` | no precedent, or best precedent cosine similarity below threshold (out of scope) | `SENTINEL_SIMILARITY_THRESHOLD` (0.58) |
+| `unsupported_request` | ticket asks for a refund, compensation or guarantee that none of the retrieved resolutions covers, or threatens legal action (en + de patterns in `guardrails.py`) | always |
+| `prompt_injection` | ticket tries to override the assistant's instructions | always |
+| `retrieval_unavailable` | precedent search failed (no mock fallback) | always |
+| `classifier_unavailable` | a model could not load and a keyword fallback was used | `SENTINEL_ESCALATE_ON_FALLBACK` (true) |
+| `missing_prediction` / `gate_error` | incomplete triage output or an error inside the gate | always |
+
+The similarity threshold was calibrated on historical tickets and hand-written queries, not on the holdout: off-topic questions score 0.33-0.55, realistic in-scope tickets 0.60-0.80, and historical neighbours have a median of 0.88.
+
+### Grounding verifier (`drafter.verify_draft`)
+
+An LLM draft is accepted only if it:
+- cites at least one ticket ID, and only IDs that were actually retrieved;
+- contains no number (price, percentage, duration, SLA figure) that does not appear in the precedents or the ticket;
+- makes no refund, compensation, guarantee or legal commitment that the precedents do not document (negated sentences such as "we cannot guarantee" are allowed);
+- is written in the requester's language and has no unfilled template placeholders.
+
+Tests: `python -m unittest discover -s tests -v`
 
 ---
 
@@ -70,6 +91,7 @@ flowchart TD
 2. **Locked the shared data split.** The training notebooks pin the full Hugging Face dataset revision and reproduce the seed-42 split of **49,412 historical tickets** and **12,353 holdout tickets**. They use subject and body as the classifier inputs and handle blank subjects. The priority run maps `critical` to `high` and `very_low` to `low`. The type run excludes historical rows with missing type labels.
 3. **Fine-tuned and verified two checkpoints.** Type and priority each started from `google-bert/bert-base-multilingual-cased` with a fresh classification head. Each Colab run first trained, saved, reloaded, and ran inference on a small sample. The full runs then fine-tuned for one epoch on a T4 GPU.
 4. **Integrated real predictions.** The three graph nodes call the predictor functions in [`triage_engine.py`](triage_engine.py). The type and priority archives are versioned with Git LFS. Local smoke tests exercised both trained models through LangGraph with English and German inputs, including a blank subject, and verified the review path when the queue model is unavailable.
+5. **Trained the queue classifier** ([`train_queue.py`](train_queue.py)). The dataset's third CSV (`dataset-tickets-german_normalized_50_5_2.csv`, ~10.6k historical rows) has no `type` or `answer` and uses a foreign queue taxonomy ("Food & Drink/Groceries", ...), so it is excluded, leaving 38,819 historical tickets across the 10 support queues. TF-IDF (word 1-2 grams + character 3-5 grams) with class-balanced logistic regression beat logistic regression on bge-m3 embeddings by a wide margin on validation (0.651 vs 0.344 macro-F1). `C` was swept on validation; a temperature fitted on a separate calibration slice lowers the expected calibration error from 0.069 to 0.040. The model is 9 MB (`models/queue/queue_classifier.joblib`, metadata in `queue_classifier.json`).
 
 ### Historical validation results
 
@@ -77,15 +99,15 @@ flowchart TD
 | --- | ---: | ---: | ---: | ---: | --- |
 | Type | 31,055 | 3,882 | 3,882 | **80.81%** | **88.96%** for `Incident` |
 | Priority | 39,529 | 4,941 | 4,942 | **57.09%** | **54.42%** for `high` |
-| Queue | — | — | — | Pending | Pending |
+| Queue | 34,937 | 3,882 | 3,882 | **65.07%** | **72.2%** for `Service Outages and Maintenance` |
 
-These results use validation subsets from the historical 80%. The final 20% evaluation is pending integration of the queue checkpoint. It will report macro-F1 for each target and joint high-priority incident recall on tickets labeled both `Incident` and `high`.
+These results use validation subsets from the historical 80%. Holdout results are in the next section and in [`findings/02_holdout_evaluation.md`](findings/02_holdout_evaluation.md).
 
 ### How prediction confidence works
 
-Each classifier produces one raw score (logit) per class. The training notebook fits a **temperature** on a separate historical calibration subset and saves it in `triage_metadata.json`. At inference, the loader divides the logits by that temperature, applies softmax, and returns the probability of the predicted class as its confidence score.
+Each classifier produces one raw score (logit) per class. A **temperature** fitted on a separate historical calibration subset (saved in `triage_metadata.json` for the BERT models and `queue_classifier.json` for the queue model) rescales the logits before the softmax, and the probability of the predicted class is the confidence score.
 
-LangGraph takes the minimum of the three scores for the `0.70` review gate. This minimum is a routing score. Macro-F1 and recall are evaluation metrics computed across many tickets. With the queue checkpoint pending, the graph still reports real type and priority predictions and routes the ticket to human review.
+LangGraph combines the three scores into a weighted routing score (0.40 type, 0.35 queue, 0.25 priority) and sends tickets below `SENTINEL_CONFIDENCE_THRESHOLD` (0.65) to human review. Macro-F1 and recall are evaluation metrics computed across many tickets.
 
 ---
 
@@ -95,19 +117,32 @@ LangGraph takes the minimum of the three scores for the `0.70` review gate. This
 .
 ├── app.py                      # Live Streamlit Operator Console
 ├── graph.py                    # LangGraph StateGraph & Node Definitions
-├── triage_engine.py            # Loads local BERT checkpoints and predicts calibrated scores
-├── pipeline.py                 # Standalone pipeline interface & language utils
-├── data_loader.py              # Ingestion, 80/20 split & zero-leakage locking
+├── triage_engine.py            # Loads the classifiers and predicts calibrated scores
+├── retriever.py                # bge-m3 + Chroma precedent search over the 80% KB
+├── safety_gate.py              # All escalation rules
+├── guardrails.py               # Sensitive-request, prompt-injection and PII detectors
+├── drafter.py                  # Gemini drafting + grounding verifier + extractive fallback
+├── burst.py                    # Live outage / burst detection
+├── text_utils.py               # Language detection and ticket text formatting
+├── train_queue.py              # Trains the queue classifier (historical split only)
+├── evaluate.py                 # Holdout evaluation (writes findings/02_holdout_evaluation.md)
+├── compare_queue_models.py     # TF-IDF vs mBERT queue model on unseen historical tickets
+├── pipeline.py                 # Legacy standalone pipeline (uses the shared gate)
+├── data_loader.py              # Ingestion, pinned dataset revision, 80/20 split, demo presets
 ├── validate_gemini.py          # CLI validation tool for Gemini API key
-├── requirements.txt            # Project dependencies
+├── requirements.txt            # Pinned dependencies (Python 3.12-3.14)
+├── tests/                      # Unit + graph integration tests
 ├── contracts/                  # Teammate function specifications & interfaces
 │   └── team_contracts.md       # Exact signatures for triage, retrieval, and drafter
 ├── findings/                   # Investigation logs & experiment findings
-│   └── 01_data_and_eda_findings.md # Dataset analysis & edge cases
-├── models/                     # Fine-tuned BERT archives tracked with Git LFS
-│   ├── type/                   # Model 1: Incident, Request, Problem, Change
-│   ├── queue/                  # Model 2: Department routing
-│   └── priority/               # Model 3: High, Medium, Low
+│   ├── 01_data_and_eda_findings.md # Dataset analysis & edge cases
+│   ├── 02_holdout_evaluation.md    # Holdout metrics (generated by evaluate.py)
+│   └── 03_queue_model_comparison.md # Queue model selection (generated by compare_queue_models.py)
+├── chroma_dbs/                 # Prebuilt Chroma index of the 49,412 historical tickets (Git LFS)
+├── models/                     # Classifier weights
+│   ├── type/                   # Model 1: mBERT, Incident, Request, Problem, Change (Git LFS)
+│   ├── queue/                  # Model 2: TF-IDF + logistic regression, 10 queues
+│   └── priority/               # Model 3: mBERT, High, Medium, Low (Git LFS)
 └── data/                       # Local data directory (Parquet files)
     ├── kb_train.parquet        # 80% split: Historical Knowledge Base (49,412 rows)
     ├── test_holdout.parquet    # 20% split: Unseen Holdout Test (12,353 rows)
@@ -130,8 +165,9 @@ git clone <repo-url>
 cd <repo-folder>
 git lfs pull
 
-# Create and activate virtual environment
-python3 -m venv .venv
+# Create and activate a Python 3.12 virtual environment
+# (the pinned requirements have no wheels for Python 3.15 yet)
+python3.12 -m venv .venv
 source .venv/bin/activate
 
 # Install dependencies
@@ -155,29 +191,51 @@ python validate_gemini.py
 ```bash
 python data_loader.py
 ```
-*Downloads the official Hugging Face dataset and locks `kb_train.parquet` (80%) and `test_holdout.parquet` (20%) deterministically.*
+*Downloads the official Hugging Face dataset at a pinned revision and locks `kb_train.parquet` (80%) and `test_holdout.parquet` (20%) deterministically. The ticket IDs match the prebuilt Chroma index.*
 
-### 5. Launch the Operator Console
+### 5. (Optional) Retrain the queue classifier and re-run the evaluation
+```bash
+python train_queue.py          # ~2 min on a laptop CPU
+python evaluate.py --full      # holdout metrics -> findings/02_holdout_evaluation.md
+```
+
+### 6. Launch the Operator Console
 ```bash
 streamlit run app.py
 ```
-Open [http://localhost:8501](http://localhost:8501) in your browser.
+Open [http://localhost:8501](http://localhost:8501) in your browser. The first start loads the models and index (~15 s, and a one-time ~2.2 GB download of BAAI/bge-m3); after that a ticket takes well under a second without the LLM.
+
+### Demo scenarios (Load Benchmark Scenario)
+- **Holdout tickets**: critical incident, German ticket, routine request, empty subject.
+- **Hospital VPN Outage**: the problem-statement scenario, escalated to on-call.
+- **Refund + Legal Threat**: blocked as an unsupported request.
+- **Prompt Injection Attempt**: blocked.
+- **Out-of-Scope Request**: no precedent above the similarity threshold, escalated.
+- **Ticket with PII**: email, phone and account number are masked before the LLM call.
+- **Outage Burst 1/3 to 3/3**: process all three (two English, one German) and the third raises the **Major Incident Outage** banner.
 
 ---
 
 ## Quantitative Evaluation Results (Holdout Test Split)
 
-Official benchmark evaluated on the 20% unseen holdout partition (`data/test_holdout.parquet` - 12,353 rows):
+`python evaluate.py --full --e2e 200 --llm 20` on all 12,353 tickets of the 20% unseen holdout (`data/test_holdout.parquet`). Models see only subject + body; the holdout `answer` column is dropped at load and the index holds 0 holdout tickets. Full report: [`findings/02_holdout_evaluation.md`](findings/02_holdout_evaluation.md).
 
-| Target Dimension | Metric | Score (Placeholder) | Target SLA |
-| :--- | :--- | :--- | :--- |
-| **Incident Type** (4 classes) | Macro-F1 | `[Pending - e.g. 0.88]` | > 0.85 |
-| **Queue / Department** (6+ classes) | Macro-F1 | `[Pending - e.g. 0.84]` | > 0.80 |
-| **Priority Level** (3 classes) | Macro-F1 | `[Pending - e.g. 0.86]` | > 0.82 |
-| **High-Priority Incident Recall** | Recall | `[Pending - e.g. 0.96]` | > 0.95 |
-| **Concurrent Triage Latency** | Latency | `[Pending - e.g. 45 ms]` | < 100 ms |
+| Target | Metric | Score | Rows scored |
+| :--- | :--- | ---: | ---: |
+| **Type** (4 classes) | Macro-F1 | **0.803** | 9,768 labelled |
+| **Priority** (3 classes) | Macro-F1 | **0.560** | 12,353 |
+| **Queue** (10 support queues) | Macro-F1 | **0.670** | 9,768 |
+| **High-Priority Incident Recall** | Strict: predicted `Incident` + `high` | **60.4%** | 1,692 |
+| **High-Priority Incident Recall** | Escalation: routed to a human by the gate | **79.2%** | 1,692 |
+| Escalation rate (triage rules only) | Share of all tickets sent to a human | 52.0% | 12,353 |
+| End-to-end latency (200-ticket sample) | p50 / p95 per ticket incl. retrieval and drafting | **78 ms / 803 ms** | 200 |
+| Grounding verifier | Auto-drafts that pass (10 live Gemini + 81 extractive) | **100%** | 91 |
 
-*Note: Once Teammate 1 saves fine-tuned weights into `models/`, run `python evaluate.py` to compute and populate the official holdout metrics.*
+Per-class F1: Type: Incident 0.80, Request 0.99, Problem 0.47, Change 0.96. Priority: high 0.62, medium 0.61, low 0.45. Queue: from 0.59 (IT Support) to 0.85 (Billing and Payments). Batched CPU cost: 10.6 ms (type) + 10.2 ms (priority) + 0.4 ms (queue) per ticket. The p95 latency is dominated by the live Gemini calls.
+
+The queue model was chosen on historical data, not the holdout: on 776 historical tickets that neither candidate saw, TF-IDF + logistic regression scored 0.661 macro-F1 vs 0.230 for the 52-label mBERT checkpoint ([`findings/03_queue_model_comparison.md`](findings/03_queue_model_comparison.md), `python compare_queue_models.py`).
+
+The weakest link is priority: the gate escalates 79% of true high-priority incidents, but 21% are predicted as `medium`/`low` with confident scores and auto-drafted.
 
 ---
 
@@ -188,5 +246,13 @@ To maintain ML integrity and adhere to evaluation rules:
    - **Knowledge Base (`kb_train.parquet`)**: 49,412 rows (80%). Allowed for classifier training and vector index creation.
    - **Evaluation Holdout (`test_holdout.parquet`)**: 12,353 rows (20%). Final inference uses only the subject and body. Labels are used afterward for scoring. Holdout answers stay out of retrieval and model inputs.
 2. **Missing Value Resilience**: ~8.7% of historical tickets have null subjects. The BERT type and priority tokenizers receive an empty subject in those cases and retain the message body.
+3. **Pinned revision**: `data_loader.py` loads dataset revision `ddf1c81a5475992c4fa6752bf1e8b4e31f07bbeb`, the same revision used to train the checkpoints and build the index.
+4. **Index check**: `evaluate.py` reads the Chroma index before scoring and aborts if any holdout `ticket_id` is indexed (current overlap: 0 of 12,353), and drops the holdout `answer` column as soon as the file is loaded.
+
+## Bonus Features
+
+- **Cross-lingual precedent matching**: bge-m3 embeds English and German into one space, so a German ticket retrieves English resolutions (and vice versa) while the reply is written in the requester's language.
+- **Live outage / burst detection** (`burst.py`): tickets processed in the last 30 minutes are compared with each new ticket; three or more describing the same failure (cosine ≥ 0.72, any language) raise a Major Incident Outage banner.
+- **PII guardrail** (`guardrails.mask_pii`): emails, phone numbers, IP addresses, IBANs, card and account numbers are replaced with placeholders before ticket text is sent to Gemini.
 
 
