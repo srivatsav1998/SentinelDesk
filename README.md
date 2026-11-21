@@ -52,9 +52,12 @@ flowchart TD
    - **`classify_queue`**: Loads the department classifier from `models/queue/` when its checkpoint is available.
    - **`classify_priority`**: Dedicated BERT model predicting `priority` (`high`, `medium`, `low`).
 3. **`merge_triage` (Fan-In)**: Uses the lowest of the three classifier confidence scores as the aggregate routing score.
-4. **`safety_gate` (Conditional Edge)**:
+4. **`safety_gate` (Gate node + Conditional Edge)**: rules live in `safety_gate.py` and are shared with `pipeline.py`. The node records `escalation_status`, `escalation_reason` and `escalation_triggers` in state; the conditional edge then routes on that decision.
    - **Escalates immediately** if `priority == high` AND `type == Incident`.
-   - **Routes to human review** if the aggregate score is below `0.70` or a classifier is unavailable.
+   - **Routes to human review** if the aggregate score is below `SENTINEL_CONFIDENCE_THRESHOLD` (default `0.65`).
+   - **Fails safe**: missing or invalid type, priority or confidence, or an error inside the gate, always escalates.
+   - **Classifier unavailable**: when a model checkpoint is missing and a keyword fallback is used, the reason says so. Set `SENTINEL_ESCALATE_ON_FALLBACK=true` to escalate these tickets instead; turn it on once all three checkpoints are in `models/`.
+   - Tests: `python -m unittest discover -s tests -v`
 5. **`retrieval_node`**: Queries the historical training KB (80% split) for top-k relevant precedents using semantic similarity.
 6. **`drafter_node`**: Synthesizes a response in the requester's detected native language citing retrieved Ticket IDs (e.g., `[Reference: TKT-01055]`).
 7. **`human_escalation_node`**: Prepares an incident summary badge and routes to on-call engineering.
