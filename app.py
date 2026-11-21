@@ -30,7 +30,7 @@ with st.sidebar:
                     test_client = genai.Client(api_key=clean_key)
                     t0 = time.perf_counter()
                     resp = test_client.models.generate_content(
-                        model="gemini-2.5-flash",
+                        model="gemini-3.8-flash",
                         contents="Ping. Respond with 'Connected'"
                     )
                     dt = round((time.perf_counter() - t0) * 1000, 1)

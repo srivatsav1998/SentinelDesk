@@ -18,7 +18,7 @@ def test_gemini_connection():
         
         start_time = time.perf_counter()
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents="Respond with only: 'API connection successful.'"
         )
         latency = round((time.perf_counter() - start_time) * 1000, 1)
