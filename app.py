@@ -1,4 +1,6 @@
 import streamlit as st
+import json
+import os
 import time
 from graph import build_sentinel_graph
 
@@ -6,6 +8,13 @@ from graph import build_sentinel_graph
 st.set_page_config(page_title="SentinelDesk", layout="wide")
 
 st.title("SentinelDesk - Incident Triage & Copilot")
+
+# Load pre-extracted benchmark scenarios from data
+PRESETS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sample_ui_presets.json")
+presets = []
+if os.path.exists(PRESETS_FILE):
+    with open(PRESETS_FILE, "r", encoding="utf-8") as f:
+        presets = json.load(f)
 
 # Load compiled LangGraph workflow
 @st.cache_resource
@@ -20,28 +29,19 @@ col_in, col_out = st.columns([1, 1], gap="medium")
 with col_in:
     st.subheader("1. Incoming Ticket")
     
-    # Simple preset dropdown for quick demoing
-    preset_choice = st.selectbox(
-        "Load Sample Ticket (Optional):",
-        [
-            "-- Custom Ticket --",
-            "Critical Server Outage (High Priority Incident)",
-            "German Billing Inquiry (Routine Request)",
-            "Missing Subject Line Ticket"
-        ]
-    )
+    # Dynamic preset selector populated from sample_ui_presets.json
+    preset_options = ["-- Custom Ticket --"] + [p["name"] for p in presets]
+    selected_option = st.selectbox("Load Benchmark Scenario (from Holdout Test Data):", preset_options)
     
     default_subject = ""
     default_body = ""
-    if "Critical Server Outage" in preset_choice:
-        default_subject = "Urgent: Production Database Cluster Down"
-        default_body = "The database cluster is unreachable. Multiple hospital telemedicine services are failing. Need immediate assistance."
-    elif "German Billing" in preset_choice:
-        default_subject = "Frage zu den Zahlungsoptionen"
-        default_body = "Guten Tag, wir möchten unsere Abonnement-Zahlungsart auf SEPA umstellen. Können Sie uns bitte die Optionen erläutern? Danke."
-    elif "Missing Subject" in preset_choice:
-        default_subject = ""
-        default_body = "User cannot reset password from the login screen. It shows error code 403."
+    if selected_option != "-- Custom Ticket --":
+        matched = next((p for p in presets if p["name"] == selected_option), None)
+        if matched:
+            default_subject = matched.get("subject", "")
+            default_body = matched.get("body", "")
+            if matched.get("notes"):
+                st.caption(f"Benchmark Goal: {matched['notes']}")
 
     subject = st.text_input("Subject:", value=default_subject, placeholder="Enter ticket subject (can be blank)")
     body = st.text_area("Body:", value=default_body, height=180, placeholder="Paste customer message here...")
