@@ -50,7 +50,7 @@ flowchart TD
 ## 📁 Repository Structure
 
 ```
-gdg_hackathon/
+.
 ├── app.py                      # Live Streamlit Operator Console
 ├── graph.py                    # LangGraph StateGraph & Node Definitions
 ├── pipeline.py                 # Standalone pipeline interface & language utils
@@ -74,7 +74,7 @@ gdg_hackathon/
 ```bash
 # Clone the repository
 git clone <repo-url>
-cd gdg_hackathon
+cd <repo-folder>
 
 # Create and activate virtual environment
 python3 -m venv .venv
