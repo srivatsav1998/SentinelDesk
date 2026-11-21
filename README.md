@@ -69,11 +69,16 @@ flowchart TD
 ├── graph.py                    # LangGraph StateGraph & Node Definitions
 ├── pipeline.py                 # Standalone pipeline interface & language utils
 ├── data_loader.py              # Ingestion, 80/20 split & zero-leakage locking
+├── validate_gemini.py          # CLI validation tool for Gemini API key
 ├── requirements.txt            # Project dependencies
 ├── contracts/                  # Teammate function specifications & interfaces
 │   └── team_contracts.md       # Exact signatures for triage, retrieval, and drafter
 ├── findings/                   # Investigation logs & experiment findings
 │   └── 01_data_and_eda_findings.md # Dataset analysis & edge cases
+├── models/                     # Local directory for fine-tuned BERT model weights
+│   ├── type/                   # Model 1: Incident, Request, Problem, Change
+│   ├── queue/                  # Model 2: Department routing
+│   └── priority/               # Model 3: High, Medium, Low
 └── data/                       # Local data directory (Parquet files)
     ├── kb_train.parquet        # 80% split: Historical Knowledge Base (49,412 rows)
     ├── test_holdout.parquet    # 20% split: Unseen Holdout Test (12,353 rows)

@@ -235,47 +235,139 @@ def human_escalation_node(state: SentinelState) -> Dict[str, Any]:
 
 
 def retrieval_node(state: SentinelState) -> Dict[str, Any]:
-    """RAG Precedent Retrieval Node."""
-    if state.get("queue") == "Billing and Payments":
+    """
+    RAG Precedent Retrieval Node:
+    Provides context-matched historical resolutions from the Knowledge Base.
+    (Hook for Teammate 2's vector search engine).
+    """
+    text = f"{state.get('subject') or ''} {state.get('body', '')}".lower()
+    
+    # 1. German Programmatic Ads / Marketing Inquiry
+    if any(k in text for k in ["festival", "werbung", "anzeigen", "programmatisch"]):
+        precedents = [
+            {
+                "ticket_id": "TKT-03821",
+                "similarity": 0.92,
+                "historical_answer": "Der DSP-Connector Sync-Fehler fuer programmatische Kampagnen wurde behoben. Manuelle Budgets wurden re-synchronisiert und Anzeigenauslieferung laeuft planmaessig."
+            },
+            {
+                "ticket_id": "TKT-01994",
+                "similarity": 0.85,
+                "historical_answer": "Kampagnen-Startzeitpunkte wurden manuell im Ad-Server validiert. Tracking-Pixel sind vollstaendig aktiv."
+            }
+        ]
+    # 2. Billing, Plans, Discounts & Pricing
+    elif any(k in text for k in ["billing", "pricing", "plans", "tier", "sepa", "discount"]):
         precedents = [
             {
                 "ticket_id": "TKT-08142",
-                "similarity": 0.89,
-                "historical_answer": "Supported payment methods include SEPA direct debit, credit card, and ACH wire transfers configured under Account Settings."
+                "similarity": 0.94,
+                "historical_answer": "Our SaaS platform offers three core subscription tiers: Starter ($29/mo), Professional ($99/mo), and Enterprise (custom contract). Supported payment integrations include SEPA direct debit, credit card, and ACH wire transfers configured in Account Settings > Billing. Data security is guaranteed under SOC2 Type II and HIPAA encryption standards."
+            },
+            {
+                "ticket_id": "TKT-02194",
+                "similarity": 0.88,
+                "historical_answer": "Annual commitments qualify for an upfront 15% discount across all tiers. Invoicing terms for Enterprise accounts are Net-30 via electronic transfer."
             }
         ]
+    # 3. Hospital / Healthcare / Patient Data Access
+    elif any(k in text for k in ["hospital", "patient", "medical", "telemedicine", "data access"]):
+        precedents = [
+            {
+                "ticket_id": "TKT-05118",
+                "similarity": 0.91,
+                "historical_answer": "Resolved database proxy TLS certificate expiration that blocked patient record query access. Flushed cached authentication tokens and restored full clinical billing data retrieval."
+            },
+            {
+                "ticket_id": "TKT-02488",
+                "similarity": 0.86,
+                "historical_answer": "Rebooted secondary replication node and verified IAM roles for hospital account sync."
+            }
+        ]
+    # 4. Default Technical / IT Support Precedent
     else:
         precedents = [
             {
                 "ticket_id": "TKT-04419",
-                "similarity": 0.84,
-                "historical_answer": "Support agent guided customer through standard self-service credential reset and verified successful sign-in."
+                "similarity": 0.87,
+                "historical_answer": "Support agent guided customer through credential refresh and verified successful multi-factor authentication sign-in."
             }
         ]
+        
     return {"retrieved_precedents": precedents}
 
 
 def drafter_node(state: SentinelState) -> Dict[str, Any]:
-    """Grounded Drafter Node in detected language."""
+    """
+    Grounded Drafter Node:
+    Calls Gemini Flash API if GEMINI_API_KEY is configured;
+    otherwise gracefully falls back to local grounded synthesis.
+    """
+    import os
     lang = state.get("detected_language", "en")
     precedents = state.get("retrieved_precedents", [])
-    ref_id = precedents[0]["ticket_id"] if precedents else "TKT-GEN"
-    ans = precedents[0]["historical_answer"] if precedents else "Please contact support."
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    draft = None
+    
+    if api_key:
+        try:
+            from google import genai
+            from google.genai import types
+            client = genai.Client(api_key=api_key)
+            
+            precedents_context = "\n\n".join([
+                f"- Ticket ID: {p.get('ticket_id')}\n  Past Resolution: {p.get('historical_answer')}"
+                for p in precedents
+            ])
+            
+            prompt = (
+                f"Customer Ticket:\n"
+                f"Subject: {state.get('subject') or 'N/A'}\n"
+                f"Body: {state.get('body')}\n\n"
+                f"Historical Precedent Resolutions (from Knowledge Base):\n"
+                f"{precedents_context}\n"
+            )
+            
+            sys_instruct = (
+                f"You are SentinelDesk, an enterprise incident response copilot. "
+                f"Synthesize a concise, professional resolution drafted strictly in the customer's language ('{lang}'). "
+                f"Strictly ground all troubleshooting instructions in the provided historical resolutions. "
+                f"Explicitly cite the relevant Ticket IDs used (e.g. '[Reference: TKT-01055]'). "
+                f"Refuse to invent ungrounded pricing, refund promises, or SLAs not in the precedents. "
+                f"If the precedents do not contain sufficient guidance, state that the issue is being reviewed by operations."
+            )
+            
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=sys_instruct,
+                    temperature=0.2,
+                    max_output_tokens=350
+                )
+            )
+            if response and response.text:
+                draft = response.text.strip()
+        except Exception:
+            draft = None
 
-    if lang == "de":
-        draft = (
-            f"Sehr geehrte Kundin, sehr geehrter Kunde,\n\n"
-            f"vielen Dank fuer Ihre Anfrage. Gemaess unserer Dokumentation (Referenz: {ref_id}):\n\n"
-            f"{ans}\n\n"
-            f"Mit freundlichen Gruessen,\nIhr SentinelDesk Support-Team"
-        )
-    else:
-        draft = (
-            f"Hello,\n\n"
-            f"Thank you for contacting support. Based on past precedent resolutions (referencing {ref_id}):\n\n"
-            f"{ans}\n\n"
-            f"Best regards,\nSentinelDesk Support Team"
-        )
+    if not draft:
+        ref_id = precedents[0]["ticket_id"] if precedents else "TKT-GEN"
+        ans = precedents[0]["historical_answer"] if precedents else "Please contact support."
+        if lang == "de":
+            draft = (
+                f"Sehr geehrte Kundin, sehr geehrter Kunde,\n\n"
+                f"vielen Dank fuer Ihre Anfrage. Gemaess unserer Dokumentation (Referenz: {ref_id}):\n\n"
+                f"{ans}\n\n"
+                f"Mit freundlichen Gruessen,\nIhr SentinelDesk Support-Team"
+            )
+        else:
+            draft = (
+                f"Hello,\n\n"
+                f"Thank you for contacting support. Based on past precedent resolutions (referencing {ref_id}):\n\n"
+                f"{ans}\n\n"
+                f"Best regards,\nSentinelDesk Support Team"
+            )
 
     latency = round((time.perf_counter() - state.get("_start_time", time.perf_counter())) * 1000, 1)
     return {

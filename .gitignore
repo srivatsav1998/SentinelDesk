@@ -21,3 +21,9 @@ problem.pdf
 # Large data splits (generated deterministically via python data_loader.py)
 data/*.parquet
 !data/sample_ui_presets.json
+
+# Large model weights (exclude binaries > 100MB)
+models/**/*.safetensors
+models/**/*.bin
+models/**/*.pt
+models/**/*.onnx

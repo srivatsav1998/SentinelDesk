@@ -9,6 +9,37 @@ st.set_page_config(page_title="SentinelDesk", layout="wide")
 
 st.title("SentinelDesk - Incident Triage & Copilot")
 
+# Sidebar Configuration
+with st.sidebar:
+    st.subheader("Cloud Settings")
+    api_key_input = st.text_input(
+        "Gemini API Key (Optional):",
+        type="password",
+        value=os.environ.get("GEMINI_API_KEY", ""),
+        help="Paste your Gemini API key to enable live cloud generation via Gemini Flash."
+    )
+    if api_key_input:
+        clean_key = api_key_input.strip()
+        os.environ["GEMINI_API_KEY"] = clean_key
+        st.success("API Key Saved in Session")
+        
+        if st.button("Test API Connection", use_container_width=True):
+            with st.spinner("Pinging Gemini API..."):
+                try:
+                    from google import genai
+                    test_client = genai.Client(api_key=clean_key)
+                    t0 = time.perf_counter()
+                    resp = test_client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents="Ping. Respond with 'Connected'"
+                    )
+                    dt = round((time.perf_counter() - t0) * 1000, 1)
+                    st.success(f"Connection Verified: {resp.text.strip()} ({dt} ms)")
+                except Exception as e:
+                    st.error(f"API Error: {str(e)}")
+    else:
+        st.caption("Running in offline mode (local grounded template). Set key to activate live Gemini Flash.")
+
 # Load pre-extracted benchmark scenarios from data
 PRESETS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sample_ui_presets.json")
 presets = []
