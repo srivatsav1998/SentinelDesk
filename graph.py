@@ -19,6 +19,7 @@ from typing import TypedDict, List, Dict, Any, Optional
 from langgraph.graph import StateGraph, START, END
 
 from triage_engine import ModelUnavailableError, predict_priority, predict_queue, predict_type
+from safety_gate import evaluate_safety_gate
 
 # Load environment variables from .env if present
 try:
@@ -78,6 +79,8 @@ class SentinelState(TypedDict, total=False):
     # Safety Gate & Decisions
     escalation_status: str       # "AUTO_DRAFT" or "ESCALATE"
     escalation_reason: str
+    escalation_triggers: List[str]   # rule ids from safety_gate.py, empty when auto-drafting
+    gate_route: str                  # "escalate" or "auto_draft"
     
     # RAG & Generation
     retrieved_precedents: List[Dict[str, Any]]
@@ -181,30 +184,47 @@ def merge_triage_node(state: SentinelState) -> Dict[str, Any]:
 # 4. Safety Gate & Downstream Nodes
 # ---------------------------------------------------------------------------
 
-def safety_gate(state: SentinelState) -> str:
+def safety_gate_node(state: SentinelState) -> Dict[str, Any]:
     """
-    Evaluates safety conditions:
+    Safety Escalation Gate (rules live in safety_gate.py):
     - Escalate if priority == high AND type == Incident
-    - Escalate if confidence < 0.65
+    - Escalate if aggregate confidence < threshold (default 0.65)
+    - Escalate if triage output is missing or invalid (fail-safe)
+    - Escalate if a classifier fell back to keyword rules (only when
+      SENTINEL_ESCALATE_ON_FALLBACK is on)
+    Records the decision in state so downstream nodes and the UI share one reason.
     """
-    if state.get("priority") == "high" and state.get("type") == "Incident":
-        return "escalate"
-    if state.get("confidence", 0.0) < 0.65:
-        return "escalate"
-    return "auto_draft"
+    unavailable = [task for task in ("type", "queue", "priority") if state.get(f"{task}_model_error")]
+    try:
+        decision = evaluate_safety_gate(
+            ticket_type=state.get("type"),
+            priority=state.get("priority"),
+            confidence=state.get("confidence"),
+            unavailable_classifiers=unavailable,
+        )
+    except Exception as error:  # Fail safe: a broken gate must never auto-draft
+        return {
+            "gate_route": "escalate",
+            "escalation_status": "ESCALATE",
+            "escalation_reason": f"Safety gate error ({error}). Flagged for human review.",
+            "escalation_triggers": ["gate_error"],
+        }
+    return {
+        "gate_route": decision.route,
+        "escalation_status": decision.status,
+        "escalation_reason": decision.reason,
+        "escalation_triggers": list(decision.triggers),
+    }
+
+
+def route_after_gate(state: SentinelState) -> str:
+    """Conditional edge: follow the gate's decision; escalate if it is missing."""
+    return "auto_draft" if state.get("gate_route") == "auto_draft" else "escalate"
 
 
 def human_escalation_node(state: SentinelState) -> Dict[str, Any]:
     """Formats on-call engineer escalation alert."""
-    reason = (
-        "High-Priority Incident detected. Immediate human intervention required."
-        if state.get("priority") == "high" and state.get("type") == "Incident"
-        else "Model confidence is below threshold (< 0.65). Flagged for human review."
-    )
-    
-    unavailable = [task for task in ("type", "queue", "priority") if state.get(f"{task}_model_error")]
-    if unavailable:
-        reason = f"{reason} (Fallback applied for: {', '.join(unavailable)})"
+    reason = state.get("escalation_reason") or "Flagged for human review."
 
     ref_ticket = "TKT-01055"
     lang = state.get("detected_language", "en")
@@ -392,9 +412,8 @@ def drafter_node(state: SentinelState) -> Dict[str, Any]:
             )
 
     latency = round((time.perf_counter() - state.get("_start_time", time.perf_counter())) * 1000, 1)
+    # escalation_status / escalation_reason were already set by the safety gate
     return {
-        "escalation_status": "AUTO_DRAFT",
-        "escalation_reason": "Safe for AI auto-reply grounded in historical precedent.",
         "draft_response": draft,
         "latency_ms": latency
     }
@@ -418,6 +437,7 @@ def build_sentinel_graph():
     builder.add_node("merge_triage", merge_triage_node)
     
     # Decision & Resolution Nodes
+    builder.add_node("safety_gate", safety_gate_node)
     builder.add_node("escalate", human_escalation_node)
     builder.add_node("retrieve", retrieval_node)
     builder.add_node("draft", drafter_node)
@@ -435,10 +455,11 @@ def build_sentinel_graph():
     builder.add_edge("classify_queue", "merge_triage")
     builder.add_edge("classify_priority", "merge_triage")
 
-    # 4. Conditional Edge: Evaluate Safety Gate
+    # 4. Safety Gate node, then Conditional Edge on its decision
+    builder.add_edge("merge_triage", "safety_gate")
     builder.add_conditional_edges(
-        "merge_triage",
-        safety_gate,
+        "safety_gate",
+        route_after_gate,
         {
             "escalate": "escalate",
             "auto_draft": "retrieve"

@@ -9,6 +9,8 @@ import os
 import re
 from typing import List, Dict, Any, Optional
 
+from safety_gate import evaluate_safety_gate
+
 # Basic heuristic language detector (English vs German)
 GERMAN_STOPWORDS = {
     "und", "der", "die", "das", "wir", "nicht", "bitte", "problem", "hilfe",
@@ -100,22 +102,19 @@ def process_ticket(
     
     # ---------------------------------------------------------
     # 2. ESCALATION & SAFETY GATE (Hook for Person 3)
-    # Rules specified in problem.pdf:
+    # Shared rules in safety_gate.py (same gate the LangGraph workflow uses):
     # - Immediate escalation if priority == high and type == Incident
-    # - Escalation if confidence is below calibrated threshold (< 0.70)
+    # - Escalation if confidence is below the configured threshold
+    # - Escalation if triage output is missing or invalid
     # ---------------------------------------------------------
-    escalate = False
-    escalation_reason = ""
-    
-    if pred_priority == "high" and pred_type == "Incident":
-        escalate = True
-        escalation_reason = "Immediate Human Escalation: High-Priority Incident detected (Service disruption / outage risk)."
-    elif confidence < 0.70:
-        escalate = True
-        escalation_reason = "Human Review Required: Model confidence below safety threshold (confidence < 0.70)."
-    else:
-        escalation_reason = "Auto-Draft Ready: Safe for AI resolution with historical precedent grounding."
-        
+    gate = evaluate_safety_gate(
+        ticket_type=pred_type,
+        priority=pred_priority,
+        confidence=confidence,
+    )
+    escalate = gate.escalate
+    escalation_reason = gate.reason
+
     # ---------------------------------------------------------
     # 3. RETRIEVAL & HISTORICAL PRECEDENTS (Hook for Person 2)
     # Simulated realistic precedents from the 80% KB
