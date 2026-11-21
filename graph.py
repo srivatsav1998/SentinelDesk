@@ -1,52 +1,52 @@
 """
 SentinelDesk LangGraph Agentic Workflow
-Concurrent Multi-Model StateGraph:
-  1. detect_language: Dynamically identifies input language using n-grams
-  2. Concurrent Triage (Fan-Out):
-     - classify_type: Dedicated model for type prediction
-     - classify_queue: Dedicated model for queue prediction
-     - classify_priority: Dedicated model for priority prediction
-  3. merge_triage (Fan-In): Aggregates concurrent predictions and computes confidence
-  4. safety_gate: Conditional edge routing to escalation vs RAG
-  5. retrieval: Precedent vector search
-  6. draft: Multilingual grounded generation citing ticket IDs
-  7. escalate: On-call engineering escalation alert
+
+  1. detect_language      deterministic en/de detection (text_utils.detect_language)
+  2. Concurrent fan-out:
+       classify_type      fine-tuned mBERT (triage_engine.predict_type)
+       classify_queue     queue classifier (triage_engine.predict_queue)
+       classify_priority  fine-tuned mBERT (triage_engine.predict_priority)
+       retrieve           top-k precedents from the 80% KB (retriever.retrieve_precedents)
+  3. merge_triage         aggregate confidence
+  4. safety_gate          all escalation rules (safety_gate.evaluate_safety_gate), including
+                          retrieval similarity and unsupported-request checks
+  5a. draft               grounded Gemini draft + verifier (drafter.generate_grounded_draft)
+  5b. escalate            holding reply for the customer + handoff note for on-call
 """
 
-import time
 import os
-from typing import TypedDict, List, Dict, Any, Optional
-from langgraph.graph import StateGraph, START, END
+import time
+from typing import Any, Dict, List, Optional, TypedDict
 
+from langgraph.graph import END, START, StateGraph
+
+from drafter import generate_grounded_draft
+from retriever import retrieve_precedents
+from safety_gate import HIGH_PRIORITY_INCIDENT, evaluate_safety_gate
+from text_utils import detect_language, ticket_text
 from triage_engine import ModelUnavailableError, predict_priority, predict_queue, predict_type
-from safety_gate import evaluate_safety_gate
 
 # Load environment variables from .env if present
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 except ImportError:
     pass
 
-# Robust language detection
-try:
-    from langdetect import detect_langs
-    def detect_language(text: str) -> str:
-        clean = text.strip()
-        if not clean:
-            return "en"
-        try:
-            preds = detect_langs(clean)
-            return preds[0].lang
-        except Exception:
-            return "en"
-except ImportError:
-    # Heuristic fallback if langdetect is unavailable
-    GERMAN_WORDS = {"und", "der", "die", "das", "wir", "nicht", "bitte", "hilfe", "sehr", "geehrte", "danke"}
-    def detect_language(text: str) -> str:
-        import re
-        words = re.findall(r'\b\w+\b', text.lower())
-        return "de" if sum(1 for w in words if w in GERMAN_WORDS) >= 2 else "en"
+
+def _env_int(name: str, default: int, low: int, high: int) -> int:
+    try:
+        return max(low, min(high, int(os.environ.get(name, default))))
+    except ValueError:
+        return default
+
+
+TOP_K = _env_int("SENTINEL_TOP_K", 3, 1, 10)
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -55,96 +55,106 @@ except ImportError:
 class SentinelState(TypedDict, total=False):
     subject: Optional[str]
     body: str
-    
-    # Detected language
+    top_k: int
+
     detected_language: str
-    
-    # Concurrent Triage Model Outputs
+
+    # Concurrent triage outputs
     type: str
     type_confidence: float
-    
     queue: str
     queue_confidence: float
-    
     priority: str
     priority_confidence: float
     type_model_error: str
     queue_model_error: str
     priority_model_error: str
-    
-    # Combined metrics
+    type_ms: float
+    queue_ms: float
+    priority_ms: float
+
     confidence: float
     latency_ms: float
-    
-    # Safety Gate & Decisions
-    escalation_status: str       # "AUTO_DRAFT" or "ESCALATE"
+
+    # Safety gate
+    escalation_status: str          # "AUTO_DRAFT" or "ESCALATE"
     escalation_reason: str
-    escalation_triggers: List[str]   # rule ids from safety_gate.py, empty when auto-drafting
-    gate_route: str                  # "escalate" or "auto_draft"
-    
-    # RAG & Generation
+    escalation_triggers: List[str]  # rule ids from safety_gate.py, empty when auto-drafting
+    gate_route: str                 # "escalate" or "auto_draft"
+    top_similarity: Optional[float]
+    unsupported_requests: List[str]
+
+    # Retrieval & generation
     retrieved_precedents: List[Dict[str, Any]]
+    retrieval_error: str
+    retrieval_ms: float
     draft_response: str
-    
+    draft_source: str               # "gemini:<model>", "template" or "escalation"
+    draft_verified: bool
+    draft_issues: List[str]
+    draft_rejected: List[Dict[str, Any]]
+    llm_error: str
+    pii_masked: Dict[str, int]
+    draft_ms: float
+    handoff_note: str
+
     _start_time: float
 
 
 # ---------------------------------------------------------------------------
-# 1. Language Detection Node
+# 1. Language detection
 # ---------------------------------------------------------------------------
 def detect_language_node(state: SentinelState) -> Dict[str, Any]:
-    start_time = time.perf_counter()
-    text = f"{state.get('subject') or ''} {state.get('body', '')}".strip()
-    lang = detect_language(text)
+    start = time.perf_counter()
     return {
-        "_start_time": start_time,
-        "detected_language": lang
+        "_start_time": start,
+        "detected_language": detect_language(ticket_text(state.get("subject"), state.get("body"))),
     }
 
 
 # ---------------------------------------------------------------------------
-# 2. Concurrent Triage Nodes (Fan-Out: Model 1, Model 2, Model 3)
+# 2. Concurrent triage + retrieval (fan-out)
 # ---------------------------------------------------------------------------
+def _keyword_fallback(task: str, text: str) -> tuple[str, float]:
+    """Last-resort labels when a checkpoint cannot be loaded (gate is told via *_model_error)."""
+    if task == "type":
+        if any(k in text for k in ["outage", "down", "fails", "broken", "breach", "disrupting"]):
+            return "Incident", 0.94
+        if any(k in text for k in ["inquire", "request", "need access", "upgrade", "how to"]):
+            return "Request", 0.90
+        if any(k in text for k in ["problem", "bug", "error"]):
+            return "Problem", 0.85
+        return "Change", 0.78
+    if task == "queue":
+        if any(k in text for k in ["billing", "pricing", "payment", "invoice", "rechnung", "sepa"]):
+            return "Billing and Payments", 0.95
+        if any(k in text for k in ["server", "platform", "outage", "cluster", "telemedicine"]):
+            return "Technical Support", 0.92
+        if any(k in text for k in ["login", "password", "vpn", "account", "reset"]):
+            return "IT Support", 0.89
+        return "Customer Service", 0.82
+    if task == "priority":
+        if any(k in text for k in ["critical", "outage", "dringend", "emergency", "fail", "urgent", "breach"]):
+            return "high", 0.96
+        if any(k in text for k in ["inquiry", "how to", "pricing", "frage"]):
+            return "low", 0.91
+        return "medium", 0.82
+    return "Unavailable", 0.0
+
 
 def _classify(state: SentinelState, task: str, predictor) -> Dict[str, Any]:
+    start = time.perf_counter()
     try:
         label, confidence = predictor(state.get("body", ""), subject=state.get("subject"))
-        return {task: label, f"{task}_confidence": confidence}
+        return {task: label, f"{task}_confidence": confidence, f"{task}_ms": _elapsed_ms(start)}
     except (ModelUnavailableError, Exception) as error:
-        # Fall back to heuristic baseline if model checkpoint is missing
-        text = f"{state.get('subject') or ''} {state.get('body', '')}".lower()
-        if task == "type":
-            if any(k in text for k in ["outage", "down", "fails", "broken", "breach", "disrupting"]):
-                label, confidence = "Incident", 0.94
-            elif any(k in text for k in ["inquire", "request", "need access", "upgrade", "how to"]):
-                label, confidence = "Request", 0.90
-            elif any(k in text for k in ["problem", "bug", "error"]):
-                label, confidence = "Problem", 0.85
-            else:
-                label, confidence = "Change", 0.78
-        elif task == "queue":
-            if any(k in text for k in ["billing", "pricing", "payment", "invoice", "rechnung", "sepa"]):
-                label, confidence = "Billing and Payments", 0.95
-            elif any(k in text for k in ["server", "platform", "outage", "cluster", "telemedicine"]):
-                label, confidence = "Technical Support", 0.92
-            elif any(k in text for k in ["login", "password", "vpn", "account", "reset"]):
-                label, confidence = "IT Support", 0.89
-            else:
-                label, confidence = "Customer Service", 0.82
-        elif task == "priority":
-            if any(k in text for k in ["critical", "outage", "dringend", "emergency", "fail", "urgent", "breach"]):
-                label, confidence = "high", 0.96
-            elif any(k in text for k in ["inquiry", "how to", "pricing", "frage"]):
-                label, confidence = "low", 0.91
-            else:
-                label, confidence = "medium", 0.82
-        else:
-            label, confidence = "Unavailable", 0.0
-
+        text = ticket_text(state.get("subject"), state.get("body")).lower()
+        label, confidence = _keyword_fallback(task, text)
         return {
             task: label,
             f"{task}_confidence": confidence,
             f"{task}_model_error": str(error),
+            f"{task}_ms": _elapsed_ms(start),
         }
 
 
@@ -160,40 +170,38 @@ def classify_priority_node(state: SentinelState) -> Dict[str, Any]:
     return _classify(state, "priority", predict_priority)
 
 
+def retrieval_node(state: SentinelState) -> Dict[str, Any]:
+    """Top-k precedents from the historical KB. No mock fallback: a failure is
+    reported to the gate, which escalates instead of drafting ungrounded text."""
+    start = time.perf_counter()
+    top_k = int(state.get("top_k") or TOP_K)
+    try:
+        precedents = retrieve_precedents(ticket_text(state.get("subject"), state.get("body")), top_k=top_k)
+        return {"retrieved_precedents": precedents, "retrieval_ms": _elapsed_ms(start)}
+    except Exception as error:
+        return {
+            "retrieved_precedents": [],
+            "retrieval_error": f"{type(error).__name__}: {error}",
+            "retrieval_ms": _elapsed_ms(start),
+        }
+
+
 # ---------------------------------------------------------------------------
-# 3. Merge / Reduce Node (Fan-In)
+# 3. Merge (fan-in)
 # ---------------------------------------------------------------------------
 def merge_triage_node(state: SentinelState) -> Dict[str, Any]:
-    """
-    Merges concurrent predictions and calculates calibrated aggregate confidence.
-    Applies multi-task weighting across type (40%), queue (35%), and priority (25%).
-    """
+    """Aggregate routing score across type (40%), queue (35%) and priority (25%)."""
     type_conf = state.get("type_confidence", 0.0)
     queue_conf = state.get("queue_confidence", 0.0)
     prio_conf = state.get("priority_confidence", 0.0)
-    
-    # Calibrated multi-task aggregate confidence
-    aggregate_confidence = round(0.40 * type_conf + 0.35 * queue_conf + 0.25 * prio_conf, 2)
-    
-    return {
-        "confidence": aggregate_confidence
-    }
+    return {"confidence": round(0.40 * type_conf + 0.35 * queue_conf + 0.25 * prio_conf, 2)}
 
 
 # ---------------------------------------------------------------------------
-# 4. Safety Gate & Downstream Nodes
+# 4. Safety gate
 # ---------------------------------------------------------------------------
-
 def safety_gate_node(state: SentinelState) -> Dict[str, Any]:
-    """
-    Safety Escalation Gate (rules live in safety_gate.py):
-    - Escalate if priority == high AND type == Incident
-    - Escalate if aggregate confidence < threshold (default 0.65)
-    - Escalate if triage output is missing or invalid (fail-safe)
-    - Escalate if a classifier fell back to keyword rules (only when
-      SENTINEL_ESCALATE_ON_FALLBACK is on)
-    Records the decision in state so downstream nodes and the UI share one reason.
-    """
+    """Applies every escalation rule (see safety_gate.py) and records one shared decision."""
     unavailable = [task for task in ("type", "queue", "priority") if state.get(f"{task}_model_error")]
     try:
         decision = evaluate_safety_gate(
@@ -201,6 +209,9 @@ def safety_gate_node(state: SentinelState) -> Dict[str, Any]:
             priority=state.get("priority"),
             confidence=state.get("confidence"),
             unavailable_classifiers=unavailable,
+            ticket_text=ticket_text(state.get("subject"), state.get("body")),
+            precedents=state.get("retrieved_precedents", []),
+            retrieval_error=state.get("retrieval_error"),
         )
     except Exception as error:  # Fail safe: a broken gate must never auto-draft
         return {
@@ -214,6 +225,8 @@ def safety_gate_node(state: SentinelState) -> Dict[str, Any]:
         "escalation_status": decision.status,
         "escalation_reason": decision.reason,
         "escalation_triggers": list(decision.triggers),
+        "top_similarity": decision.top_similarity,
+        "unsupported_requests": list(decision.unsupported),
     }
 
 
@@ -222,284 +235,117 @@ def route_after_gate(state: SentinelState) -> str:
     return "auto_draft" if state.get("gate_route") == "auto_draft" else "escalate"
 
 
+# ---------------------------------------------------------------------------
+# 5a. Escalation path
+# ---------------------------------------------------------------------------
 def human_escalation_node(state: SentinelState) -> Dict[str, Any]:
-    """Formats on-call engineer escalation alert."""
-    reason = state.get("escalation_reason") or "Flagged for human review."
-
-    ref_ticket = "TKT-01055"
+    """Holding reply for the customer (no claims, no promises) plus an internal
+    handoff note listing the real retrieved precedents for the on-call engineer."""
     lang = state.get("detected_language", "en")
-    
-    if lang == "de":
-        draft = (
-            f"Sehr geehrte Kundin, sehr geehrter Kunde,\n\n"
-            f"Ihre Meldung wurde mit hoechster Dringlichkeit an unser On-Call Ingenieurteam eskaliert "
-            f"(Referenzfall: {ref_ticket}). Ein Techniker prueft den Vorfall umgehend.\n\n"
-            f"Mit freundlichen Gruessen,\nSentinelDesk Operations"
-        )
-    else:
-        draft = (
-            f"Hello,\n\n"
-            f"Your issue has been flagged with high priority and escalated immediately to our On-Call Engineering Team "
-            f"(Reference: {ref_ticket}). An engineer will investigate shortly.\n\n"
-            f"Best regards,\nSentinelDesk Operations Team"
-        )
-
-    precedents = [
-        {
-            "ticket_id": ref_ticket,
-            "similarity": 0.94,
-            "historical_answer": "Incident escalated directly to L2 On-Call Engineers. Rolled back patch and restored services."
-        }
-    ]
-    
-    latency = round((time.perf_counter() - state.get("_start_time", time.perf_counter())) * 1000, 1)
-    return {
-        "escalation_status": "ESCALATE",
-        "escalation_reason": reason,
-        "retrieved_precedents": precedents,
-        "draft_response": draft,
-        "latency_ms": latency
-    }
-
-
-def retrieval_node(state: SentinelState) -> Dict[str, Any]:
-    """
-    RAG Precedent Retrieval Node:
-    Attempts to call Teammate 2's vector search engine (retriever.py).
-    If retriever.py is not yet established, falls back to context-matched benchmark mocks.
-    """
-    text_query = f"{state.get('subject') or ''} {state.get('body', '')}".strip()
-    top_k = state.get("top_k", 2)
-
-    # 1. LIVE HOOK: Call Teammate 2's retriever if established
-    try:
-        from retriever import retrieve_precedents
-        live_precedents = retrieve_precedents(text_query, top_k=top_k)
-        if live_precedents:
-            return {"retrieved_precedents": live_precedents}
-    except (ImportError, AttributeError, Exception):
-        pass  # Fall back to benchmark mocks below until retriever is live
-
-    # 2. FALLBACK BENCHMARK MOCKS (active only until live vector DB is plugged in)
-    text = text_query.lower()
-    if any(k in text for k in ["festival", "werbung", "anzeigen", "programmatisch"]):
-        precedents = [
-            {
-                "ticket_id": "TKT-03821",
-                "similarity": 0.92,
-                "historical_answer": "Der DSP-Connector Sync-Fehler fuer programmatische Kampagnen wurde behoben. Manuelle Budgets wurden re-synchronisiert und Anzeigenauslieferung laeuft planmaessig."
-            },
-            {
-                "ticket_id": "TKT-01994",
-                "similarity": 0.85,
-                "historical_answer": "Kampagnen-Startzeitpunkte wurden manuell im Ad-Server validiert. Tracking-Pixel sind vollstaendig aktiv."
-            }
-        ]
-    elif any(k in text for k in ["billing", "pricing", "plans", "tier", "sepa", "discount"]):
-        precedents = [
-            {
-                "ticket_id": "TKT-08142",
-                "similarity": 0.94,
-                "historical_answer": "Our SaaS platform offers three core subscription tiers: Starter ($29/mo), Professional ($99/mo), and Enterprise (custom contract). Supported payment integrations include SEPA direct debit, credit card, and ACH wire transfers configured in Account Settings > Billing. Data security is guaranteed under SOC2 Type II and HIPAA encryption standards."
-            },
-            {
-                "ticket_id": "TKT-02194",
-                "similarity": 0.88,
-                "historical_answer": "Annual commitments qualify for an upfront 15% discount across all tiers. Invoicing terms for Enterprise accounts are Net-30 via electronic transfer."
-            }
-        ]
-    elif any(k in text for k in ["hospital", "patient", "medical", "telemedicine", "data access"]):
-        precedents = [
-            {
-                "ticket_id": "TKT-05118",
-                "similarity": 0.91,
-                "historical_answer": "Resolved database proxy TLS certificate expiration that blocked patient record query access. Flushed cached authentication tokens and restored full clinical billing data retrieval."
-            },
-            {
-                "ticket_id": "TKT-02488",
-                "similarity": 0.86,
-                "historical_answer": "Rebooted secondary replication node and verified IAM roles for hospital account sync."
-            }
-        ]
-    else:
-        precedents = [
-            {
-                "ticket_id": "TKT-04419",
-                "similarity": 0.87,
-                "historical_answer": "Support agent guided customer through credential refresh and verified successful multi-factor authentication sign-in."
-            }
-        ]
-        
-    return {"retrieved_precedents": precedents}
-
-
-def drafter_node(state: SentinelState) -> Dict[str, Any]:
-    """
-    Grounded Drafter Node:
-    Calls Gemini Flash API if GEMINI_API_KEY is configured;
-    otherwise gracefully falls back to local grounded synthesis.
-    """
-    import os
-    lang = state.get("detected_language", "en")
+    incident = HIGH_PRIORITY_INCIDENT in (state.get("escalation_triggers") or [])
     precedents = state.get("retrieved_precedents", [])
-    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    draft = None
-    
-    if api_key:
-        try:
-            from google import genai
-            from google.genai import types
-            client = genai.Client(api_key=api_key)
-            
-            precedents_context = "\n\n".join([
-                f"- Ticket ID: {p.get('ticket_id')}\n  Past Resolution: {p.get('historical_answer')}"
-                for p in precedents
-            ])
-            
-            prompt = (
-                f"Customer Ticket:\n"
-                f"Subject: {state.get('subject') or 'N/A'}\n"
-                f"Body: {state.get('body')}\n\n"
-                f"Historical Precedent Resolutions (from Knowledge Base):\n"
-                f"{precedents_context}\n"
-            )
-            
-            sys_instruct = (
-                f"You are SentinelDesk, an enterprise incident response copilot. "
-                f"Synthesize a concise, professional resolution drafted strictly in the customer's language ('{lang}'). "
-                f"Strictly ground all troubleshooting instructions in the provided historical resolutions. "
-                f"Explicitly cite the relevant Ticket IDs used (e.g. '[Reference: TKT-01055]'). "
-                f"Refuse to invent ungrounded pricing, refund promises, or SLAs not in the precedents. "
-                f"If the precedents do not contain sufficient guidance, state that the issue is being reviewed by operations."
-            )
-            
-            # Use active fast model with fallback
-            for model_name in ["gemini-3.5-flash-lite", "gemini-3.8-flash"]:
-                try:
-                    response = client.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction=sys_instruct,
-                            temperature=0.2,
-                            max_output_tokens=350
-                        )
-                    )
-                    if response and response.text:
-                        draft = response.text.strip()
-                        break
-                except Exception:
-                    continue
-        except Exception:
-            draft = None
 
-    if not draft:
-        ref_id = precedents[0]["ticket_id"] if precedents else "TKT-GEN"
-        ans = precedents[0]["historical_answer"] if precedents else "Please contact support."
-        if lang == "de":
-            draft = (
-                f"Sehr geehrte Kundin, sehr geehrter Kunde,\n\n"
-                f"vielen Dank fuer Ihre Anfrage. Gemaess unserer Dokumentation (Referenz: {ref_id}):\n\n"
-                f"{ans}\n\n"
-                f"Mit freundlichen Gruessen,\nIhr SentinelDesk Support-Team"
-            )
-        else:
-            draft = (
-                f"Hello,\n\n"
-                f"Thank you for contacting support. Based on past precedent resolutions (referencing {ref_id}):\n\n"
-                f"{ans}\n\n"
-                f"Best regards,\nSentinelDesk Support Team"
-            )
+    if lang == "de":
+        status = ("Ihre Meldung wurde als dringender Vorfall eingestuft und sofort an unser "
+                  "Bereitschafts-Ingenieurteam weitergeleitet." if incident else
+                  "Ihre Anfrage wurde zur Prüfung an einen Support-Spezialisten weitergeleitet.")
+        draft = (f"Guten Tag,\n\nvielen Dank für Ihre Nachricht. {status} Wir melden uns so schnell wie "
+                 f"möglich bei Ihnen.\n\nMit freundlichen Grüßen\nIhr SentinelDesk Support-Team")
+    else:
+        status = ("Your report has been classified as a high-priority incident and escalated immediately "
+                  "to our on-call engineering team." if incident else
+                  "Your request has been forwarded to a support specialist for review.")
+        draft = (f"Hello,\n\nThank you for contacting us. {status} We will get back to you as soon as "
+                 f"possible.\n\nBest regards,\nSentinelDesk Support Team")
 
-    latency = round((time.perf_counter() - state.get("_start_time", time.perf_counter())) * 1000, 1)
-    # escalation_status / escalation_reason were already set by the safety gate
+    lines = [f"Escalation reason: {state.get('escalation_reason', 'Flagged for human review.')}"]
+    if precedents:
+        lines.append("Closest historical precedents:")
+        lines += [f"- [{p['ticket_id']}] similarity {p['similarity']:.2f}: {p['historical_answer'][:220]}"
+                  for p in precedents]
+    else:
+        lines.append("No historical precedent retrieved.")
+
     return {
         "draft_response": draft,
-        "latency_ms": latency
+        "draft_source": "escalation",
+        "draft_verified": True,
+        "draft_issues": [],
+        "handoff_note": "\n".join(lines),
+        "latency_ms": _elapsed_ms(state.get("_start_time", time.perf_counter())),
     }
 
 
 # ---------------------------------------------------------------------------
-# 5. Graph Assembly (Concurrent Map-Reduce)
+# 5b. Grounded drafting path
+# ---------------------------------------------------------------------------
+def drafter_node(state: SentinelState) -> Dict[str, Any]:
+    start = time.perf_counter()
+    result = generate_grounded_draft(
+        state.get("subject"),
+        state.get("body", ""),
+        state.get("detected_language", "en"),
+        state.get("retrieved_precedents", []),
+    )
+    # escalation_status / escalation_reason were already set by the safety gate
+    return {
+        "draft_response": result.text,
+        "draft_source": result.source,
+        "draft_verified": result.verified,
+        "draft_issues": result.issues,
+        "draft_rejected": result.rejected_drafts,
+        "llm_error": result.llm_error or "",
+        "pii_masked": result.pii_masked,
+        "draft_ms": _elapsed_ms(start),
+        "latency_ms": _elapsed_ms(state.get("_start_time", time.perf_counter())),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Graph assembly
 # ---------------------------------------------------------------------------
 def build_sentinel_graph():
     builder = StateGraph(SentinelState)
 
-    # Add Nodes
     builder.add_node("detect_language", detect_language_node)
-    
-    # 3 Concurrent Triage Nodes
     builder.add_node("classify_type", classify_type_node)
     builder.add_node("classify_queue", classify_queue_node)
     builder.add_node("classify_priority", classify_priority_node)
-    
-    # Merge Node
+    builder.add_node("retrieve", retrieval_node)
     builder.add_node("merge_triage", merge_triage_node)
-    
-    # Decision & Resolution Nodes
     builder.add_node("safety_gate", safety_gate_node)
     builder.add_node("escalate", human_escalation_node)
-    builder.add_node("retrieve", retrieval_node)
     builder.add_node("draft", drafter_node)
 
-    # 1. Start with Language Detection
     builder.add_edge(START, "detect_language")
 
-    # 2. Fan-Out: Run the 3 classifiers in parallel
-    builder.add_edge("detect_language", "classify_type")
-    builder.add_edge("detect_language", "classify_queue")
-    builder.add_edge("detect_language", "classify_priority")
+    # Fan-out: 3 classifiers + precedent retrieval run in parallel
+    for node in ("classify_type", "classify_queue", "classify_priority", "retrieve"):
+        builder.add_edge("detect_language", node)
+        builder.add_edge(node, "merge_triage")
 
-    # 3. Fan-In: All 3 classifiers feed into merge_triage
-    builder.add_edge("classify_type", "merge_triage")
-    builder.add_edge("classify_queue", "merge_triage")
-    builder.add_edge("classify_priority", "merge_triage")
-
-    # 4. Safety Gate node, then Conditional Edge on its decision
     builder.add_edge("merge_triage", "safety_gate")
     builder.add_conditional_edges(
         "safety_gate",
         route_after_gate,
-        {
-            "escalate": "escalate",
-            "auto_draft": "retrieve"
-        }
+        {"escalate": "escalate", "auto_draft": "draft"},
     )
-
-    # 5. Final resolution paths
-    builder.add_edge("retrieve", "draft")
     builder.add_edge("escalate", END)
     builder.add_edge("draft", END)
-
     return builder.compile()
 
 
 if __name__ == "__main__":
     app = build_sentinel_graph()
-    
-    print("Testing Concurrent LangGraph with Critical Outage Ticket:")
-    res1 = app.invoke({
-        "subject": "Platform outage",
-        "body": "Critical database cluster failure. Hospital telemedicine systems down."
-    })
-    print(f"Detected Lang: {res1['detected_language']}")
-    print(f"Type: {res1['type']} ({res1['type_confidence']})")
-    print(f"Queue: {res1['queue']} ({res1['queue_confidence']})")
-    print(f"Priority: {res1['priority']} ({res1['priority_confidence']})")
-    print(f"Aggregate Confidence: {res1['confidence']}")
-    print(f"Escalation Status: {res1['escalation_status']}")
-    print(f"Reason: {res1['escalation_reason']}")
-    print("-" * 50)
-    
-    print("Testing Concurrent LangGraph with German Billing Inquiry:")
-    res2 = app.invoke({
-        "subject": "Frage zu SEPA",
-        "body": "Guten Tag, wir moechten wissen wie wir SEPA Lastschrift aktivieren koennen."
-    })
-    print(f"Detected Lang: {res2['detected_language']}")
-    print(f"Type: {res2['type']} ({res2['type_confidence']})")
-    print(f"Queue: {res2['queue']} ({res2['queue_confidence']})")
-    print(f"Priority: {res2['priority']} ({res2['priority_confidence']})")
-    print(f"Aggregate Confidence: {res2['confidence']}")
-    print(f"Escalation Status: {res2['escalation_status']}")
-    print(f"Draft:\n{res2['draft_response']}")
+    for subject, body in [
+        ("Platform outage", "Critical database cluster failure. Hospital telemedicine systems down."),
+        ("Frage zu SEPA", "Guten Tag, wir möchten wissen, wie wir die SEPA-Lastschrift aktivieren können."),
+    ]:
+        result = app.invoke({"subject": subject, "body": body})
+        print(f"\n[{result['detected_language']}] {subject}")
+        print(f"  type={result['type']} ({result['type_confidence']:.2f})  queue={result['queue']} "
+              f"({result['queue_confidence']:.2f})  priority={result['priority']} ({result['priority_confidence']:.2f})")
+        print(f"  {result['escalation_status']}: {result['escalation_reason']}")
+        print(f"  precedents: {[(p['ticket_id'], p['similarity']) for p in result.get('retrieved_precedents', [])]}")
+        print(f"  draft ({result.get('draft_source')}, verified={result.get('draft_verified')}):\n{result['draft_response']}")
+        print(f"  latency {result['latency_ms']} ms")
