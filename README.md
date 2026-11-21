@@ -20,30 +20,44 @@ Enterprise IT helpdesks face two critical challenges:
 
 ## Architecture & Workflow
 
-SentinelDesk is implemented as a deterministic state graph:
+SentinelDesk is implemented as a deterministic, concurrent state graph:
 
 ```mermaid
 flowchart TD
-    Start([Raw Incoming Ticket]) --> Triage[1. Triage Classification Node]
-    Triage --> Gate{Safety Escalation Gate}
+    Start([Raw Incoming Ticket]) --> Detect[1. Language Detection Node]
+    
+    Detect --> C_Type[2a. Model 1: Type Classifier]
+    Detect --> C_Queue[2b. Model 2: Queue Classifier]
+    Detect --> C_Priority[2c. Model 3: Priority Classifier]
+
+    C_Type --> Merge[3. Merge Triage Node]
+    C_Queue --> Merge
+    C_Priority --> Merge
+
+    Merge --> Gate{4. Safety Escalation Gate}
 
     Gate -- "Priority == High & Type == Incident<br/>OR Confidence < 0.70" --> Escalate[Human Escalation Node]
-    Gate -- "Safe / High Confidence" --> RAG[2. Precedent Retrieval Node]
+    Gate -- "Safe / High Confidence" --> RAG[5. Precedent Retrieval Node]
 
-    RAG --> Drafter[3. Grounded Drafter Node]
+    RAG --> Drafter[6. Grounded Drafter Node]
 
     Escalate --> UI([Live Operator Console])
     Drafter --> UI
 ```
 
 ### Graph Execution Path:
-1. **`triage_node`**: Extracts language, handles nullable subject lines, predicts ticket attributes (`type`, `queue`, `priority`), and computes a confidence score.
-2. **`safety_gate` (Conditional Edge)**:
+1. **`detect_language`**: Dynamically detects the input language using character n-grams.
+2. **Concurrent Triage (Fan-Out)**:
+   - **`classify_type`**: Dedicated BERT model predicting `type` (`Incident`, `Request`, `Problem`, `Change`).
+   - **`classify_queue`**: Dedicated BERT model predicting department queue.
+   - **`classify_priority`**: Dedicated BERT model predicting `priority` (`high`, `medium`, `low`).
+3. **`merge_triage` (Fan-In)**: Collects the concurrent predictions and computes the calibrated aggregate confidence.
+4. **`safety_gate` (Conditional Edge)**:
    - **Escalates immediately** if `priority == high` AND `type == Incident`.
-   - **Escalates immediately** if classifier confidence falls below `0.70`.
-3. **`retrieval_node`**: Queries the historical training KB (80% split) for top-k relevant precedents using semantic similarity.
-4. **`drafter_node`**: Synthesizes a response in the requester's native language (`en` or `de`) citing retrieved Ticket IDs (e.g., `[Reference: TKT-01055]`).
-5. **`human_escalation_node`**: Prepares an incident summary badge and routes to on-call engineering.
+   - **Escalates immediately** if aggregate confidence falls below `0.70`.
+5. **`retrieval_node`**: Queries the historical training KB (80% split) for top-k relevant precedents using semantic similarity.
+6. **`drafter_node`**: Synthesizes a response in the requester's detected native language citing retrieved Ticket IDs (e.g., `[Reference: TKT-01055]`).
+7. **`human_escalation_node`**: Prepares an incident summary badge and routes to on-call engineering.
 
 ---
 
