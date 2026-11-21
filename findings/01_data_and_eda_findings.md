@@ -55,3 +55,21 @@ To avoid any data leakage into retrieval or evaluation:
 1. **Rule 1**: Any ticket where `priority == high` AND `type == Incident` MUST be routed to Human Escalation (cannot be auto-drafted).
 2. **Rule 2**: If the model confidence or precedent retrieval similarity is below threshold $\tau$, route to Human Escalation.
 3. **Rule 3 (Zero Leakage)**: Never index or query `test_holdout.parquet` during retrieval indexing.
+
+---
+
+## 4. Dataset Composition (Why ~10.6k Rows Have No `type`)
+
+`load_dataset("Tobi-Bueck/customer-support-tickets")` has no config, so it concatenates all three CSVs in the repository:
+
+| File | Columns | Notes |
+| :--- | :--- | :--- |
+| `aa_dataset-tickets-multi-lang-5-2-50-version.csv` | subject, body, answer, type, queue, priority, language, version, tags | Recommended file |
+| `dataset-tickets-multi-lang-4-20k.csv` | same minus `version` | Older version, same 10-queue taxonomy |
+| `dataset-tickets-german_normalized_50_5_2.csv` | subject, body, queue, priority, language | **No `answer`, no `type`**, ~100 foreign queues ("Food & Drink/Groceries", "News", ...) |
+
+Consequences handled in code:
+* **Queue classifier** (`train_queue.py`) and queue scoring (`evaluate.py`) use only rows with a `type` label: 38,819 historical / 9,768 holdout tickets across the 10 support queues.
+* **Retrieval** (`retriever.py`) searches only indexed tickets with a non-empty `answer` (10,602 indexed rows have none), so every precedent can ground a reply.
+* **Type** training already excluded rows without a label; **priority** labels exist in all three files (`critical` -> `high`, `very_low` -> `low`).
+* `data_loader.py` pins revision `ddf1c81a5475992c4fa6752bf1e8b4e31f07bbeb`. A local run reproduces the Chroma index exactly (2,000 of 2,000 sampled ticket IDs have identical bodies; 0 holdout IDs indexed).
