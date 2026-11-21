@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: Syntax and lint check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile all Python files
+        run: python -m compileall -q .
+
+      - name: Check for errors with Ruff
+        # Only serious problems: syntax errors, undefined names, invalid comparisons.
+        run: |
+          pip install ruff
+          ruff check --select E9,F63,F7,F82 --output-format=github .
