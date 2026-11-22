@@ -1,0 +1,13 @@
+# Shared UI theme for the operator console (secrets.toml stays git-ignored).
+[theme]
+base = "light"
+primaryColor = "#14233B"
+backgroundColor = "#F3F6F9"
+secondaryBackgroundColor = "#E8EDF2"
+textColor = "#14233B"
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
