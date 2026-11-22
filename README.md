@@ -77,8 +77,9 @@ The similarity threshold was calibrated on historical tickets and hand-written q
 
 An LLM draft is accepted only if it:
 - cites at least one ticket ID, and only IDs that were actually retrieved;
-- contains no number (price, percentage, duration, SLA figure) that does not appear in the precedents or the ticket;
-- makes no refund, compensation, guarantee or legal commitment that the precedents do not document (negated sentences such as "we cannot guarantee" are allowed);
+- contains no number that does not appear in the evidence; prices, percentages and durations must come from the precedents, never from the (untrusted) ticket, so an injected "90% off within 24 hours" cannot pass;
+- contains no link, email address or phone number that the precedents do not contain;
+- makes no refund, compensation, guarantee, discount or legal commitment that the precedents affirmatively document. Negation only counts when it directly precedes the term in the same clause ("we cannot guarantee" is a refusal; "no worries, we will refund you" is a commitment), and a precedent that refused a refund is not support for one;
 - is written in the requester's language and has no unfilled template placeholders.
 
 Tests: `python -m unittest discover -s tests -v`
@@ -115,7 +116,10 @@ LangGraph combines the three scores into a weighted routing score (0.40 type, 0.
 
 ```
 .
-├── app.py                      # Live Streamlit Operator Console
+├── server.py                   # Operator console server (Starlette JSON API + static UI)
+├── static/                     # Console UI: index.html, styles.css, app.js (no build step)
+├── explain.py                  # Highlights and queue-model explanations for the console
+├── app.py                      # Previous Streamlit console (fallback)
 ├── graph.py                    # LangGraph StateGraph & Node Definitions
 ├── triage_engine.py            # Loads the classifiers and predicts calibrated scores
 ├── retriever.py                # bge-m3 + Chroma precedent search over the 80% KB
@@ -201,9 +205,15 @@ python evaluate.py --full      # holdout metrics -> findings/02_holdout_evaluati
 
 ### 6. Launch the Operator Console
 ```bash
-streamlit run app.py
+python server.py
 ```
-Open [http://localhost:8501](http://localhost:8501) in your browser. The first start loads the models and index (~15 s, and a one-time ~2.2 GB download of BAAI/bge-m3); after that a ticket takes well under a second without the LLM.
+Open [http://localhost:8000](http://localhost:8000). The first start loads the models and index (~15 s, and a one-time ~2.2 GB download of BAAI/bge-m3); after that a ticket takes about 80 ms without the LLM. The previous Streamlit console still works as a fallback: `streamlit run app.py`.
+
+The console has three views:
+- **Triage**: paste a ticket or pick a sample. Shows the decision and plain-language reasons, calibrated confidence per model, the words that drove the queue choice, a **pipeline trace** (per-node timing waterfall), the draft with each grounding check, the similar resolved tickets with a similarity bar against the threshold, and highlights of sensitive requests, injection attempts and personal data in the ticket. Operators can **approve, edit, escalate or correct** the triage; every decision is stored PII-masked in `data/feedback.jsonl` for the next training round.
+- **Plain chatbot comparison** (switch in Triage): the same ticket answered by Gemini with no retrieval and no checks, with our grounding check listing what it invented.
+- **Live inbox**: unseen holdout tickets (subject and message only) are triaged as they arrive, with live counts, a department breakdown, and an **Inject an outage** button that triggers the major-outage banner.
+- **Evaluation**: holdout metrics, F1 per class, the queue model comparison, and an interactive **safety vs workload** chart of the confidence threshold.
 
 ### Demo scenarios (Load Benchmark Scenario)
 - **Holdout tickets**: critical incident, German ticket, routine request, empty subject.
@@ -228,14 +238,14 @@ Open [http://localhost:8501](http://localhost:8501) in your browser. The first s
 | **High-Priority Incident Recall** | Strict: predicted `Incident` + `high` | **60.4%** | 1,692 |
 | **High-Priority Incident Recall** | Escalation: routed to a human by the gate | **79.2%** | 1,692 |
 | Escalation rate (triage rules only) | Share of all tickets sent to a human | 52.0% | 12,353 |
-| End-to-end latency (200-ticket sample) | p50 / p95 per ticket incl. retrieval and drafting | **78 ms / 803 ms** | 200 |
-| Grounding verifier | Auto-drafts that pass (10 live Gemini + 81 extractive) | **100%** | 91 |
+| End-to-end latency (200-ticket sample) | p50 / p95 per ticket incl. retrieval and drafting | **80 ms / 860 ms** | 200 |
+| Grounding verifier | Auto-drafts that pass (9 live Gemini + 82 extractive) | **100%** | 91 |
 
 Per-class F1: Type: Incident 0.80, Request 0.99, Problem 0.47, Change 0.96. Priority: high 0.62, medium 0.61, low 0.45. Queue: from 0.59 (IT Support) to 0.85 (Billing and Payments). Batched CPU cost: 10.6 ms (type) + 10.2 ms (priority) + 0.4 ms (queue) per ticket. The p95 latency is dominated by the live Gemini calls.
 
 The queue model was chosen on historical data, not the holdout: on 776 historical tickets that neither candidate saw, TF-IDF + logistic regression scored 0.661 macro-F1 vs 0.230 for the 52-label mBERT checkpoint ([`findings/03_queue_model_comparison.md`](findings/03_queue_model_comparison.md), `python compare_queue_models.py`).
 
-The weakest link is priority: the gate escalates 79% of true high-priority incidents, but 21% are predicted as `medium`/`low` with confident scores and auto-drafted.
+The weakest link is priority: the gate escalates 79% of true high-priority incidents, but 21% are predicted as `medium`/`low` with confident scores and auto-drafted. The confidence threshold trades this off against workload (`findings/threshold_tradeoff.json`, chart in the console): at 0.75, 94.5% of urgent incidents reach a person while 78% of all tickets are escalated; at the 0.65 default, 79.2% and 52.0%.
 
 ---
 
