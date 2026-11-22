@@ -50,47 +50,69 @@ SENSITIVE_PATTERNS: dict[str, re.Pattern[str]] = {
 ALWAYS_ESCALATE = {"legal"}
 
 _NEGATION = re.compile(
-    r"\b(?:not|no|cannot|can't|unable|never|without|nicht|kein\w*|keine\w*|leider)\b", re.IGNORECASE
+    r"\b(?:not|no|never|cannot|unable|without|nicht|nie|niemals|kein\w*)\b|\w+n['’]t\b", re.IGNORECASE
 )
+# A negation only applies within its own clause ("we will not delay; we will refund"
+# still commits to a refund).
+_CLAUSE_BREAK = re.compile(r"[,;:.!?\n]|\b(?:but|however|although|aber|jedoch|sondern)\b", re.IGNORECASE)
+_NEGATION_WINDOW = 6  # words before the term
+
+
+def _is_negated(text: str, start: int) -> bool:
+    clause = _CLAUSE_BREAK.split(text[:start])[-1]
+    return bool(_NEGATION.search(" ".join(clause.split()[-_NEGATION_WINDOW:])))
+
+
+# Commitments checked in drafts: the gate categories plus discounts / waived fees,
+# which are common in sales tickets (so not a gate rule) but must never be invented.
+COMMITMENT_PATTERNS: dict[str, re.Pattern[str]] = {
+    **SENSITIVE_PATTERNS,
+    "discount": re.compile(
+        r"\bdiscount\w*|\bfree of charge\b|\bwaive\w*|\bcomplimentary\b|\bprice (?:match|guarantee|freeze)\b"
+        # German compounds: "Mengenrabatt", "Treuerabatt", "Sonderpreisnachlass"
+        r"|rabatt\w*|preisnachlass\w*|\bkostenlos\w*|\bgratis\b|\bgebühr\w* erlass\w*",
+        re.IGNORECASE,
+    ),
+}
+
+
+def affirmative_mentions(text: str, patterns: dict[str, re.Pattern[str]] = SENSITIVE_PATTERNS) -> list[str]:
+    """Categories with at least one non-negated mention in `text`.
+
+    "We cannot offer a refund" is a refusal, not a commitment, and does not count;
+    "No worries, we will refund your fee" does count.
+    """
+    text = text or ""
+    found: list[str] = []
+    for name, pattern in patterns.items():
+        if any(not _is_negated(text, m.start()) for m in pattern.finditer(text)):
+            found.append(name)
+    return found
+
+
+def affirmative_commitments(text: str) -> list[str]:
+    """Commitments (refund, compensation, guarantee, legal, discount) asserted in a draft."""
+    return affirmative_mentions(text, COMMITMENT_PATTERNS)
 
 
 def detect_sensitive_requests(text: str) -> list[str]:
-    """Sensitive action categories mentioned in `text` (stable order)."""
+    """Sensitive action categories mentioned in `text` (stable order). Every mention
+    counts here, negated or not, so the gate errs towards escalation."""
     text = text or ""
     return [name for name, pattern in SENSITIVE_PATTERNS.items() if pattern.search(text)]
 
 
 def unsupported_requests(ticket_text: str, precedent_answers: Iterable[str]) -> list[str]:
-    """Sensitive categories the ticket asks for that no precedent answer covers.
+    """Sensitive categories the ticket asks for that no precedent answer affirmatively
+    covers (a precedent that refused a refund is not support for one).
 
     Categories in ALWAYS_ESCALATE are returned whenever the ticket mentions them.
     """
     requested = detect_sensitive_requests(ticket_text)
     if not requested:
         return []
-    evidence = "\n".join(a for a in precedent_answers if a)
-    unsupported = []
-    for name in requested:
-        if name in ALWAYS_ESCALATE or not SENSITIVE_PATTERNS[name].search(evidence):
-            unsupported.append(name)
-    return unsupported
-
-
-def _sentences(text: str) -> list[str]:
-    return [s for s in re.split(r"(?<=[.!?])\s+|\n+", text or "") if s.strip()]
-
-
-def affirmative_commitments(text: str) -> list[str]:
-    """Sensitive categories asserted in `text`, ignoring negated sentences
-    ("we cannot guarantee ..." is a refusal, not a commitment)."""
-    found: list[str] = []
-    for sentence in _sentences(text):
-        if _NEGATION.search(sentence):
-            continue
-        for name, pattern in SENSITIVE_PATTERNS.items():
-            if name not in found and pattern.search(sentence):
-                found.append(name)
-    return found
+    supported = set(affirmative_mentions("\n".join(a for a in precedent_answers if a)))
+    return [name for name in requested if name in ALWAYS_ESCALATE or name not in supported]
 
 
 # ---------------------------------------------------------------------------

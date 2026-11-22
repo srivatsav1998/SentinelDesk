@@ -16,6 +16,8 @@ from typing import Optional
 
 import numpy as np
 
+from guardrails import mask_pii
+
 DUPLICATE_SIMILARITY = 0.999
 
 
@@ -36,6 +38,8 @@ class BurstDetector:
 
     def add(self, label: str, subject: str, embedding: np.ndarray, now: Optional[float] = None) -> Optional[BurstAlert]:
         now = time.time() if now is None else now
+        # The window is shared by every operator session, so keep only masked subjects.
+        subject = mask_pii(subject or "")[0][:80]
         vector = np.asarray(embedding, dtype=np.float32)
         vector = vector / (np.linalg.norm(vector) or 1.0)
         with self._lock:

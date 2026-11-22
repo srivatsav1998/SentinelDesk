@@ -18,6 +18,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional, TypedDict
 
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from drafter import generate_grounded_draft
@@ -279,13 +280,18 @@ def human_escalation_node(state: SentinelState) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 5b. Grounded drafting path
 # ---------------------------------------------------------------------------
-def drafter_node(state: SentinelState) -> Dict[str, Any]:
+def drafter_node(state: SentinelState, config: RunnableConfig) -> Dict[str, Any]:
+    """The Gemini key can be passed per call via config={"configurable": {"gemini_api_key": ...}}
+    ("" forces offline drafting); otherwise the server's GEMINI_API_KEY is used. The key is
+    never written to state or to the shared process environment."""
     start = time.perf_counter()
+    api_key = (config or {}).get("configurable", {}).get("gemini_api_key")
     result = generate_grounded_draft(
         state.get("subject"),
         state.get("body", ""),
         state.get("detected_language", "en"),
         state.get("retrieved_precedents", []),
+        api_key=api_key,
     )
     # escalation_status / escalation_reason were already set by the safety gate
     return {

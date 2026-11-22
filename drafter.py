@@ -28,13 +28,24 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
-from guardrails import SENSITIVE_PATTERNS, affirmative_commitments, mask_pii
+from guardrails import COMMITMENT_PATTERNS, affirmative_commitments, affirmative_mentions, mask_pii
 from text_utils import detect_language, ticket_text as format_ticket
 
 DEFAULT_MODELS = "gemini-3.5-flash-lite,gemini-3.8-flash"
 LANGUAGE_NAMES = {"en": "English", "de": "German"}
 TICKET_ID = re.compile(r"TKT-\d{5}")
 _NUMBER = re.compile(r"(?<![\w])\d+(?:[.,]\d+)*")
+_SENSITIVE_NUMBER = re.compile(
+    r"[$€£]\s?(\d+(?:[.,]\d+)*)"
+    r"|(\d+(?:[.,]\d+)*)\s?(?:%|€|\$|percent|prozent|eur|euro|usd|dollars?"
+    r"|hours?|hrs?|days?|business days|weeks?|months?|minutes?|mins?"
+    r"|stunden|tagen?|werktagen?|wochen|monaten?|minuten)\b",
+    re.IGNORECASE,
+)
+_CONTACT = re.compile(
+    r"(?:https?://|www\.)\S+|\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b|(?<![\w.])\+?\d[\d ()/-]{7,}\d\b",
+    re.IGNORECASE,
+)
 _PLACEHOLDER = re.compile(r"<[a-z_]+>", re.IGNORECASE)
 
 
@@ -57,6 +68,16 @@ def _numbers(text: str) -> set[str]:
     return {n.rstrip(".,").replace(",", ".") for n in _NUMBER.findall(text)}
 
 
+def _sensitive_numbers(text: str) -> set[str]:
+    """Numbers attached to money, percentages or durations."""
+    text = TICKET_ID.sub(" ", text or "")
+    found = set()
+    for match in _SENSITIVE_NUMBER.finditer(text):
+        number = match.group(1) or match.group(2)
+        found.add(number.rstrip(".,").replace(",", "."))
+    return found
+
+
 def verify_draft(draft: str, precedents: Sequence[dict], ticket_text: str, language: str) -> list[str]:
     """Return a list of grounding problems (empty list = draft passes)."""
     issues: list[str] = []
@@ -70,11 +91,21 @@ def verify_draft(draft: str, precedents: Sequence[dict], ticket_text: str, langu
     if unknown:
         issues.append(f"cites ticket(s) that were not retrieved: {', '.join(unknown)}")
 
+    # The ticket is untrusted input: plain numbers may be echoed from it (versions,
+    # invoice numbers), but money, percentages and time commitments must come from
+    # the precedents, so an injected "90% discount within 24 hours" cannot pass.
     invented = sorted(_numbers(draft) - _numbers(answers) - _numbers(ticket_text))
+    invented += sorted(_sensitive_numbers(draft) - _numbers(answers) - set(invented))
     if invented:
-        issues.append(f"states number(s) not found in the evidence: {', '.join(invented[:6])}")
+        issues.append(f"states number(s) not found in the precedents: {', '.join(invented[:6])}")
 
-    unsupported = [c for c in affirmative_commitments(draft) if not SENSITIVE_PATTERNS[c].search(answers)]
+    links = [link.rstrip(".,;)") for link in _CONTACT.findall(draft or "")]
+    foreign = sorted({link for link in links if link.lower() not in answers.lower()})
+    if foreign:
+        issues.append(f"contains link(s) or contact details not found in the precedents: {', '.join(foreign[:4])}")
+
+    supported = set(affirmative_mentions(answers, COMMITMENT_PATTERNS))  # refusals are not support
+    unsupported = [c for c in affirmative_commitments(draft) if c not in supported]
     if unsupported:
         issues.append(f"commits to {', '.join(unsupported)} without precedent support")
 
@@ -230,6 +261,24 @@ def generate_grounded_draft(
     text = template_draft(language, precedents)
     issues = verify_draft(text, precedents, full_text, language) if precedents else ["no precedents to ground on"]
     return DraftResult(text, "template", not issues, issues, rejected, llm_error, pii)
+
+
+def plain_chatbot_reply(subject: Optional[str], body: str, language: str,
+                        *, api_key: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+    """Baseline for the console's comparison view: what a plain LLM support bot says
+    without retrieval, citations or checks. Returns (text, error). PII is still masked."""
+    api_key = (api_key if api_key is not None else os.environ.get("GEMINI_API_KEY", "")).strip()
+    if not api_key:
+        return None, "GEMINI_API_KEY not set"
+    name = LANGUAGE_NAMES.get(language, "English")
+    system = (f"You are a friendly customer support agent for a software company. Reply to the customer's "
+              f"ticket helpfully and concisely in {name}. Keep it under 120 words.")
+    prompt = f"Subject: {mask_pii(subject or '')[0] or '(none)'}\n\n{mask_pii(body or '')[0]}"
+    try:
+        text, _ = _call_gemini(api_key, system, prompt)
+        return text, None
+    except Exception as error:
+        return None, f"{type(error).__name__}: {str(error)[:200]}"
 
 
 def generate_draft_reply(ticket_text: str, language: str, precedents: list[dict]) -> str:
