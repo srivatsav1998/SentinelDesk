@@ -16,6 +16,7 @@ Usage: python compare_queue_models.py   -> findings/03_queue_model_comparison.md
 from __future__ import annotations
 
 import collections
+import json
 import os
 from pathlib import Path
 
@@ -28,6 +29,7 @@ import triage_engine
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "findings" / "03_queue_model_comparison.md"
+OUT_JSON = ROOT / "findings" / "queue_model_comparison.json"
 SEED = 42
 
 
@@ -89,7 +91,12 @@ def main() -> None:
         "`SENTINEL_QUEUE_BACKEND=transformer` to use the checkpoint instead.",
     ]
     OUT.write_text("\n".join(lines) + "\n")
-    print(f"saved {OUT.relative_to(ROOT)}")
+    OUT_JSON.write_text(json.dumps({
+        "tickets": len(rows),
+        "models": [{"name": name, "macro_f1": round(r["macro_f1"], 4), "accuracy": round(r["accuracy"], 4),
+                    "foreign_predictions": r["foreign"]} for name, r in results.items()],
+    }, indent=2))
+    print(f"saved {OUT.relative_to(ROOT)} and {OUT_JSON.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

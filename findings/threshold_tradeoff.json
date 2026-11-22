@@ -1,0 +1,76 @@
+{
+  "tickets": 12353,
+  "high_priority_incidents": 1692,
+  "points": [
+    {
+      "threshold": 0.3,
+      "escalation_rate": 0.242,
+      "hpi_escalation_recall": 0.604
+    },
+    {
+      "threshold": 0.35,
+      "escalation_rate": 0.242,
+      "hpi_escalation_recall": 0.604
+    },
+    {
+      "threshold": 0.4,
+      "escalation_rate": 0.242,
+      "hpi_escalation_recall": 0.604
+    },
+    {
+      "threshold": 0.45,
+      "escalation_rate": 0.2478,
+      "hpi_escalation_recall": 0.6111
+    },
+    {
+      "threshold": 0.5,
+      "escalation_rate": 0.2691,
+      "hpi_escalation_recall": 0.6259
+    },
+    {
+      "threshold": 0.55,
+      "escalation_rate": 0.3118,
+      "hpi_escalation_recall": 0.6696
+    },
+    {
+      "threshold": 0.6,
+      "escalation_rate": 0.3846,
+      "hpi_escalation_recall": 0.7145
+    },
+    {
+      "threshold": 0.65,
+      "escalation_rate": 0.5199,
+      "hpi_escalation_recall": 0.792
+    },
+    {
+      "threshold": 0.7,
+      "escalation_rate": 0.6626,
+      "hpi_escalation_recall": 0.8794
+    },
+    {
+      "threshold": 0.75,
+      "escalation_rate": 0.7842,
+      "hpi_escalation_recall": 0.945
+    },
+    {
+      "threshold": 0.8,
+      "escalation_rate": 0.8842,
+      "hpi_escalation_recall": 0.9917
+    },
+    {
+      "threshold": 0.85,
+      "escalation_rate": 0.9679,
+      "hpi_escalation_recall": 0.9994
+    },
+    {
+      "threshold": 0.9,
+      "escalation_rate": 0.9955,
+      "hpi_escalation_recall": 1.0
+    },
+    {
+      "threshold": 0.95,
+      "escalation_rate": 0.9985,
+      "hpi_escalation_recall": 1.0
+    }
+  ]
+}

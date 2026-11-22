@@ -17,11 +17,11 @@ Per-class F1:
 - Priority: high 0.62, medium 0.61, low 0.45
 - Queue: Technical Support 0.72, Product Support 0.64, Customer Service 0.62, IT Support 0.59, Billing and Payments 0.85, Returns and Exchanges 0.65, Service Outages and Maintenance 0.74, Sales and Pre-Sales 0.60, Human Resources 0.66, General Inquiry 0.63
 
-Triage cost (batched, CPU): {'type': 10.56, 'priority': 10.24, 'queue': 0.38}
+Triage cost (batched, CPU): {'type': 10.48, 'priority': 10.72, 'queue': 0.37}
 
 ## End-to-end pipeline sample (200 tickets, 20 with live Gemini)
 
-- Latency per ticket: p50 78 ms, p95 803 ms
+- Latency per ticket: p50 80 ms, p95 860 ms
 - Escalation rate: 54.5%; gate triggers: {'low_confidence': 67, 'high_priority_incident': 50}
 - High-priority incidents escalated: 0.76 (25 in sample)
-- Auto-drafts: 91 (sources {'gemini': 10, 'template': 81}), passing the grounding verifier: 1.0
+- Auto-drafts: 91 (sources {'gemini': 9, 'template': 82}), passing the grounding verifier: 1.0

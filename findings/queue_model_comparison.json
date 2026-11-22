@@ -1,0 +1,17 @@
+{
+  "tickets": 776,
+  "models": [
+    {
+      "name": "TF-IDF + logistic regression",
+      "macro_f1": 0.6607,
+      "accuracy": 0.6817,
+      "foreign_predictions": 0
+    },
+    {
+      "name": "mBERT (52-label checkpoint)",
+      "macro_f1": 0.2301,
+      "accuracy": 0.4265,
+      "foreign_predictions": 3
+    }
+  ]
+}

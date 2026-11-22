@@ -56,15 +56,15 @@
   },
   "triage_escalation_rate": 0.5199,
   "triage_ms_per_ticket": {
-    "type": 10.56,
-    "priority": 10.24,
-    "queue": 0.38
+    "type": 10.48,
+    "priority": 10.72,
+    "queue": 0.37
   },
   "end_to_end": {
     "tickets": 200,
     "llm_tickets": 20,
-    "latency_ms_p50": 78.2,
-    "latency_ms_p95": 802.9,
+    "latency_ms_p50": 79.8,
+    "latency_ms_p95": 860.2,
     "escalation_rate": 0.545,
     "trigger_counts": {
       "low_confidence": 67,
@@ -73,8 +73,8 @@
     "auto_drafts": 91,
     "draft_verified_rate": 1.0,
     "draft_sources": {
-      "gemini": 10,
-      "template": 81
+      "gemini": 9,
+      "template": 82
     },
     "high_priority_incidents": 25,
     "high_priority_incident_escalation_recall": 0.76

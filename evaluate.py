@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import collections
 import json
-import os
 import sqlite3
 import time
 from pathlib import Path
@@ -42,6 +41,7 @@ HOLDOUT_PATH = ROOT / "data" / "test_holdout.parquet"
 CHROMA_SQLITE = ROOT / "chroma_dbs" / "chroma.sqlite3"
 RESULTS_JSON = ROOT / "findings" / "holdout_metrics.json"
 RESULTS_MD = ROOT / "findings" / "02_holdout_evaluation.md"
+TRADEOFF_JSON = ROOT / "findings" / "threshold_tradeoff.json"
 
 TYPE_CLASSES = ["Incident", "Request", "Problem", "Change"]
 PRIORITY_CLASSES = ["high", "medium", "low"]
@@ -112,6 +112,26 @@ def run_triage(df: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
     return timings, out
 
 
+def threshold_tradeoff(df: pd.DataFrame, hpi: pd.Series) -> dict:
+    """Escalation rate vs high-priority-incident escalation recall for a range of
+    confidence thresholds (triage rules only). Reported for transparency; the shipped
+    default (0.65) was fixed before this curve was computed."""
+    points = []
+    for step in range(30, 96, 5):
+        threshold = step / 100
+        escalate = [
+            evaluate_safety_gate(ticket_type=t, priority=p, confidence=c, threshold=threshold).escalate
+            for t, p, c in zip(df["pred_type"], df["pred_priority"], df["confidence"])
+        ]
+        escalate = pd.Series(escalate, index=df.index)
+        points.append({
+            "threshold": threshold,
+            "escalation_rate": round(float(escalate.mean()), 4),
+            "hpi_escalation_recall": round(float(escalate[hpi].mean()), 4) if hpi.any() else None,
+        })
+    return {"tickets": len(df), "high_priority_incidents": int(hpi.sum()), "points": points}
+
+
 def run_end_to_end(df: pd.DataFrame, n: int, n_llm: int) -> dict:
     """Full LangGraph on a sample: retrieval + gate + draft (template unless n_llm > 0)."""
     import graph
@@ -121,13 +141,14 @@ def run_end_to_end(df: pd.DataFrame, n: int, n_llm: int) -> dict:
 
     retriever.warm_up()
     sample = df.sample(n=min(n, len(df)), random_state=7)
-    api_key = os.environ.get("GEMINI_API_KEY", "")
     latencies, triggers, verified, sources = [], collections.Counter(), [], collections.Counter()
     hpi_total = hpi_escalated = 0
     for i, row in enumerate(sample.itertuples()):
-        os.environ["GEMINI_API_KEY"] = api_key if i < n_llm else ""
+        # None -> server key (live Gemini); "" -> offline extractive draft
+        config = {"configurable": {"gemini_api_key": None if i < n_llm else ""}}
         start = time.perf_counter()
-        result = app.invoke({"subject": row.subject if isinstance(row.subject, str) else "", "body": row.body})
+        result = app.invoke({"subject": row.subject if isinstance(row.subject, str) else "", "body": row.body},
+                            config=config)
         latencies.append((time.perf_counter() - start) * 1000)
         triggers.update(result.get("escalation_triggers", []))
         if result.get("escalation_status") == "AUTO_DRAFT":
@@ -136,7 +157,6 @@ def run_end_to_end(df: pd.DataFrame, n: int, n_llm: int) -> dict:
         if row.type == "Incident" and PRIORITY_MAP.get(str(row.priority)) == "high":
             hpi_total += 1
             hpi_escalated += result.get("escalation_status") == "ESCALATE"
-    os.environ["GEMINI_API_KEY"] = api_key
     escalated = len(sample) - len(verified)
     return {
         "tickets": len(sample),
@@ -235,6 +255,7 @@ def main() -> None:
         "triage_escalation_rate": round(float(df["gate_escalate"].mean()), 4),
         "triage_ms_per_ticket": timings,
     }
+    TRADEOFF_JSON.write_text(json.dumps(threshold_tradeoff(df, hpi), indent=2))
     if args.e2e:
         print(f"Running the full pipeline on {args.e2e} tickets ({args.llm} with live Gemini)...")
         results["end_to_end"] = run_end_to_end(df, args.e2e, args.llm)
