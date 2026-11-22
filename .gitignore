@@ -13,7 +13,8 @@ __pycache__/
 .DS_Store
 
 # Streamlit
-.streamlit/
+.streamlit/*
+!.streamlit/config.toml
 
 # Environment variables & secrets
 .env
@@ -33,3 +34,6 @@ models/**/*.safetensors
 models/**/*.bin
 models/**/*.pt
 models/**/*.onnx
+
+# Operator feedback captured by the console (contains masked ticket text)
+data/feedback.jsonl

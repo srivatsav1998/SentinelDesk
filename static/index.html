@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SentinelDesk</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230A1524'/%3E%3Cpath d='M16 6a10 10 0 0 1 8.7 5L16 16z' fill='%23FF7A45'/%3E%3Cpath d='M24.7 11A10 10 0 0 1 16 26V16z' fill='%2334D3BC'/%3E%3Cpath d='M16 26A10 10 0 0 1 16 6v10z' fill='%237FA8FF'/%3E%3Ccircle cx='16' cy='16' r='4.5' fill='%230A1524'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@500&display=swap">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <span class="wordmark">SentinelDesk</span>
+      <span class="tagline">incident triage copilot</span>
+    </div>
+    <nav class="tabs" role="tablist" aria-label="Views">
+      <button role="tab" id="tab-triage" data-view="triage" aria-selected="true">Triage</button>
+      <button role="tab" id="tab-inbox" data-view="inbox" aria-selected="false">Live inbox</button>
+      <button role="tab" id="tab-evaluation" data-view="evaluation" aria-selected="false">Evaluation</button>
+    </nav>
+    <div class="status">
+      <span class="pill" id="pill-models"><span class="dot"></span><span class="pill-text">Loading models</span></span>
+      <span class="pill" id="pill-gemini"><span class="dot"></span><span class="pill-text">Checking Gemini</span></span>
+      <span class="pill" id="pill-feedback"><span class="pill-text">0 corrections</span></span>
+      <button class="icon-btn" id="theme-toggle" type="button" aria-label="Switch to light theme" title="Switch theme">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 3a9 9 0 1 0 0 18V3z"/><circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="outage" class="outage" role="alert" hidden>
+    <div class="outage-inner">
+      <span class="outage-pulse" aria-hidden="true"></span>
+      <div>
+        <strong id="outage-title">Possible major outage</strong>
+        <span id="outage-text"></span>
+      </div>
+      <button type="button" id="outage-dismiss" class="ghost small">Clear</button>
+    </div>
+  </div>
+
+  <main>
+    <!-- Triage -->
+    <section id="view-triage" class="view" role="tabpanel" aria-labelledby="tab-triage">
+      <div class="triage-grid">
+        <aside class="composer panel">
+          <h2>Incoming ticket</h2>
+          <p class="label">Try a sample</p>
+          <div id="sample-list" class="samples"></div>
+          <p class="hint" id="sample-note"></p>
+          <label for="subject">Subject</label>
+          <input id="subject" type="text" placeholder="Optional" autocomplete="off">
+          <label for="body">Message</label>
+          <textarea id="body" rows="11" placeholder="Paste the customer's message, in English or German"></textarea>
+          <label class="switch" for="compare">
+            <input type="checkbox" id="compare">
+            <span class="track" aria-hidden="true"></span>
+            <span>Compare with a plain chatbot</span>
+          </label>
+          <button class="primary run" id="run" type="button">Triage ticket <kbd id="run-kbd">Ctrl Enter</kbd></button>
+        </aside>
+        <div class="results" id="results" aria-live="polite"></div>
+      </div>
+    </section>
+
+    <!-- Live inbox -->
+    <section id="view-inbox" class="view" role="tabpanel" aria-labelledby="tab-inbox" hidden>
+      <div class="inbox-head">
+        <div>
+          <h2>Live inbox</h2>
+          <p class="sub">Unseen holdout tickets arrive one by one and are triaged as they land. Only the subject and message are sent; labels and answers never leave the holdout file.</p>
+        </div>
+        <div class="actions">
+          <button id="stream-start" class="primary" type="button">Start stream</button>
+          <button id="stream-outage" type="button">Inject an outage</button>
+          <button id="stream-clear" class="ghost" type="button">Clear</button>
+        </div>
+      </div>
+      <div class="kpis" id="inbox-kpis"></div>
+      <div class="inbox-grid">
+        <div class="panel feed-panel">
+          <div class="feed-head"><span>Ticket</span><span>Type</span><span>Priority</span><span>Queue</span><span>Decision</span><span class="num">Time</span></div>
+          <ol class="feed" id="feed"></ol>
+          <p class="empty-note" id="feed-empty">Start the stream to watch tickets arrive. Select a ticket to open it in Triage.</p>
+        </div>
+        <div class="panel side">
+          <h3>By department</h3>
+          <div id="dept-bars" class="bars"></div>
+          <h3>Decisions</h3>
+          <div id="decision-split" class="split-wrap"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Evaluation -->
+    <section id="view-evaluation" class="view" role="tabpanel" aria-labelledby="tab-evaluation" hidden>
+      <div id="evaluation"></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
